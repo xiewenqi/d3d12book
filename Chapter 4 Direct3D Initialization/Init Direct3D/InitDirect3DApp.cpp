@@ -1,4 +1,4 @@
-//***************************************************************************************
+﻿//***************************************************************************************
 // Init Direct3D.cpp by Frank Luna (C) 2015 All Rights Reserved.
 //
 // Demonstrates the sample framework by initializing Direct3D, clearing 
@@ -87,6 +87,7 @@ void InitDirect3DApp::Draw(const GameTimer& gt)
     ThrowIfFailed(mCommandList->Reset(mDirectCmdListAlloc.Get(), nullptr));
 
 	// Indicate a state transition on the resource usage.
+	// todo xiewneqi: backBuffer默认状态是present? 有什么API可以查询呢？
 	mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(CurrentBackBuffer(),
 		D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET));
 

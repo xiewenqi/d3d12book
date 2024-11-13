@@ -1,9 +1,10 @@
-//***************************************************************************************
+﻿//***************************************************************************************
 // d3dApp.cpp by Frank Luna (C) 2015 All Rights Reserved.
 //***************************************************************************************
 
 #include "d3dApp.h"
 #include <WindowsX.h>
+#include <sstream>
 
 using Microsoft::WRL::ComPtr;
 using namespace std;
@@ -162,7 +163,8 @@ void D3DApp::OnResize()
 		DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH));
 
 	mCurrBackBuffer = 0;
- 
+	
+	// create(recreate) render target view
 	CD3DX12_CPU_DESCRIPTOR_HANDLE rtvHeapHandle(mRtvHeap->GetCPUDescriptorHandleForHeapStart());
 	for (UINT i = 0; i < SwapChainBufferCount; i++)
 	{
@@ -185,7 +187,7 @@ void D3DApp::OnResize()
 	//   1. SRV format: DXGI_FORMAT_R24_UNORM_X8_TYPELESS
 	//   2. DSV Format: DXGI_FORMAT_D24_UNORM_S8_UINT
 	// we need to create the depth buffer resource with a typeless format.  
-	depthStencilDesc.Format = DXGI_FORMAT_R24G8_TYPELESS;
+	depthStencilDesc.Format = mDepthStencilFormat;
 
     depthStencilDesc.SampleDesc.Count = m4xMsaaState ? 4 : 1;
     depthStencilDesc.SampleDesc.Quality = m4xMsaaState ? (m4xMsaaQuality - 1) : 0;
@@ -585,7 +587,8 @@ void D3DApp::CalculateFrameStats()
 	frameCnt++;
 
 	// Compute averages over one second period.
-	if( (mTimer.TotalTime() - timeElapsed) >= 1.0f )
+	float diffTime = mTimer.TotalTime() - timeElapsed;
+	if(diffTime >= 1.0f )
 	{
 		float fps = (float)frameCnt; // fps = frameCnt / 1
 		float mspf = 1000.0f / fps;
@@ -601,7 +604,7 @@ void D3DApp::CalculateFrameStats()
 		
 		// Reset for next average.
 		frameCnt = 0;
-		timeElapsed += 1.0f;
+		timeElapsed += diffTime;
 	}
 }
 
@@ -615,11 +618,10 @@ void D3DApp::LogAdapters()
         DXGI_ADAPTER_DESC desc;
         adapter->GetDesc(&desc);
 
-        std::wstring text = L"***Adapter: ";
-        text += desc.Description;
-        text += L"\n";
-
-        OutputDebugString(text.c_str());
+		std::wstringstream ss;
+		ss << L"***Adapter: " << desc.Description << L", VendorId: " << desc.VendorId << L", DeviceId: " << desc.DeviceId << L", SubSysId: " << desc.SubSysId << L", Revision: " << desc.Revision << L", DedicatedVideoMemory: " << desc.DedicatedVideoMemory << L", DedicatedSystemMemory: " << desc.DedicatedSystemMemory << L", SharedSystemMemory: " << desc.SharedSystemMemory << L", AdapterLuid: " << desc.AdapterLuid.HighPart << L"_" << desc.AdapterLuid.LowPart << std::endl;
+		
+        OutputDebugString(ss.str().c_str());
 
         adapterList.push_back(adapter);
         
