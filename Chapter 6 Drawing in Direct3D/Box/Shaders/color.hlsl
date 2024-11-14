@@ -10,11 +10,6 @@ cbuffer cbPerObject : register(b0)
 	float currentTime;
 };
 
-cbuffer cbGlobal : register(b1)
-{
-	float globalTime;
-}
-
 struct VertexIn
 {
 	float3 PosL  : POSITION;
@@ -31,8 +26,8 @@ VertexOut VS(VertexIn vin)
 {
 	VertexOut vout;
 
-	vin.PosL.xy += 0.5f * sin(vin.PosL.x) * sin(3.0f * globalTime);
-	vin.PosL.z += 0.6f + 0.4f * sin(2.0f * globalTime);
+	// vin.PosL.xy += 0.5f * sin(vin.PosL.x) * sin(3.0f * currentTime);
+	// vin.PosL.z += 0.6f + 0.4f * sin(2.0f * currentTime);
 	
 	// Transform to homogeneous clip space.
 	vout.PosH = mul(float4(vin.PosL, 1.0f), gWorldViewProj);

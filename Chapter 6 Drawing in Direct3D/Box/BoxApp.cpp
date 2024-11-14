@@ -16,7 +16,7 @@ using Microsoft::WRL::ComPtr;
 using namespace DirectX;
 using namespace DirectX::PackedVector;
 
-#define USING_SINGLE_VERTEX_BUFFER 0
+#define USING_SINGLE_VERTEX_BUFFER 1
 
 struct Vertex
 {
@@ -73,6 +73,8 @@ private:
 #else
     void BuildBoxGeometryMultiVertexBuffers();
 #endif
+    void BuildPyramidGeometry();
+    
     void BuildPSO();
 
 private:
@@ -81,8 +83,6 @@ private:
     ComPtr<ID3D12DescriptorHeap> mCbvHeap = nullptr;
 
     std::unique_ptr<UploadBuffer<ObjectConstants>> mObjectCB = nullptr;
-
-    std::unique_ptr<UploadBuffer<GlobalConstants>> mGlobalCB = nullptr;
 
 #if USING_SINGLE_VERTEX_BUFFER
 	std::unique_ptr<MeshGeometry> mBoxGeo = nullptr;
@@ -101,6 +101,8 @@ private:
     UINT mIndexCount = 0;
 #endif
 
+    std::unique_ptr<MeshGeometry> mPyramidGeo = nullptr;
+
     ComPtr<ID3DBlob> mvsByteCode = nullptr;
     ComPtr<ID3DBlob> mpsByteCode = nullptr;
 
@@ -112,9 +114,11 @@ private:
     XMFLOAT4X4 mView = MathHelper::Identity4x4();
     XMFLOAT4X4 mProj = MathHelper::Identity4x4();
 
+    XMFLOAT4X4 mWorldForPyramid = MathHelper::Identity4x4();
+
     float mTheta = 1.5f*XM_PI;
     float mPhi = XM_PIDIV4;
-    float mRadius = 5.0f;
+    float mRadius = 6.0f;
 
     POINT mLastMousePos;
 };
@@ -168,6 +172,7 @@ bool BoxApp::Initialize()
 #else
     BuildBoxGeometryMultiVertexBuffers();
 #endif
+    BuildPyramidGeometry();
     BuildPSO();
 
     // Execute the initialization commands.
@@ -198,8 +203,9 @@ void BoxApp::Update(const GameTimer& gt)
     float y = mRadius*cosf(mPhi);
 
     // Build the view matrix.
-    XMVECTOR pos = XMVectorSet(x, y, z, 1.0f);
-    XMVECTOR target = XMVectorZero();
+    XMVECTOR viewOffset = XMVectorSet(-1.5, 0, 0, 0);
+    XMVECTOR pos = XMVectorSet(x, y, z, 1.0f) + viewOffset;
+    XMVECTOR target = XMVectorZero() + viewOffset;
     XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
 
     XMMATRIX view = XMMatrixLookAtLH(pos, target, up);
@@ -207,19 +213,29 @@ void BoxApp::Update(const GameTimer& gt)
 
     XMMATRIX world = XMLoadFloat4x4(&mWorld);
     XMMATRIX proj = XMLoadFloat4x4(&mProj);
-    XMMATRIX worldViewProj = world*view*proj;
+    
+    // 立方体设置constant buffer值
+    {
 
-	// Update the constant buffer with the latest worldViewProj matrix.
-	ObjectConstants objConstants;
-    XMStoreFloat4x4(&objConstants.WorldViewProj, XMMatrixTranspose(worldViewProj));
-    objConstants.CurrentTime = mTimer.TotalTime();
-    mObjectCB->CopyData(0, objConstants);
+        XMMATRIX worldViewProj = world * view * proj;
 
-    // Update the global buffer with current time from GameTimer
-    GlobalConstants globalConstants;
-    globalConstants.GlobalTime = mTimer.TotalTime();
-    mGlobalCB->CopyData(0, globalConstants);
+        // Update the constant buffer with the latest worldViewProj matrix.
+        ObjectConstants objConstants;
+        XMStoreFloat4x4(&objConstants.WorldViewProj, XMMatrixTranspose(worldViewProj));
+        objConstants.CurrentTime = mTimer.TotalTime();
+        mObjectCB->CopyData(0, objConstants);
+    }
 
+    // 金字塔设置constant buffer值
+    {
+        XMMATRIX worldForPyramid = XMMatrixTranslation(-3.0f, 0, 0);
+        XMMATRIX wvp = worldForPyramid * view * proj;
+
+        ObjectConstants objConstants;
+        XMStoreFloat4x4(&objConstants.WorldViewProj, XMMatrixTranspose(wvp));
+        objConstants.CurrentTime = mTimer.TotalTime();
+        mObjectCB->CopyData(1, objConstants);
+    }
 }
 
 void BoxApp::Draw(const GameTimer& gt)
@@ -253,8 +269,9 @@ void BoxApp::Draw(const GameTimer& gt)
 	mCommandList->SetDescriptorHeaps(_countof(descriptorHeaps), descriptorHeaps);
 
 	mCommandList->SetGraphicsRootSignature(mRootSignature.Get());
-    mCommandList->SetGraphicsRootDescriptorTable(0, mCbvHeap->GetGPUDescriptorHandleForHeapStart());
 
+    // 绘制立方体
+    mCommandList->SetGraphicsRootDescriptorTable(0, mCbvHeap->GetGPUDescriptorHandleForHeapStart());
 #if USING_SINGLE_VERTEX_BUFFER
 	mCommandList->IASetVertexBuffers(0, 1, &mBoxGeo->VertexBufferView());
     mCommandList->IASetIndexBuffer(&mBoxGeo->IndexBufferView());
@@ -288,6 +305,13 @@ void BoxApp::Draw(const GameTimer& gt)
 
     mCommandList->DrawIndexedInstanced(mIndexCount, 1, 0, 0, 0);
 #endif
+
+    // 绘制金字塔
+    CD3DX12_GPU_DESCRIPTOR_HANDLE pyrimidViewHandle(mCbvHeap->GetGPUDescriptorHandleForHeapStart(), 1, mCbvSrvUavDescriptorSize);
+    mCommandList->SetGraphicsRootDescriptorTable(0, pyrimidViewHandle);
+    mCommandList->IASetVertexBuffers(0, 1, &mPyramidGeo->VertexBufferView());
+    mCommandList->IASetIndexBuffer(&mPyramidGeo->IndexBufferView());
+    mCommandList->DrawIndexedInstanced(mPyramidGeo->DrawArgs["pyramid"].IndexCount, 1, 0, 0, 0);
 	
     // Indicate a state transition on the resource usage.
 	mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(CurrentBackBuffer(),
@@ -376,34 +400,26 @@ void BoxApp::BuildConstantBuffers()
 {
     // 创建object constant buffer及描述符
     {
-        mObjectCB = std::make_unique<UploadBuffer<ObjectConstants>>(md3dDevice.Get(), 1, true);
+        // 创建两个上传堆及对应的描述符，一个给立方体，一个给金字塔
+        int numberOfConstantBuffer = 2;
+        mObjectCB = std::make_unique<UploadBuffer<ObjectConstants>>(md3dDevice.Get(), numberOfConstantBuffer, true);
 
         UINT objCBByteSize = mObjectCB->ElementByteSize();
 
-        D3D12_GPU_VIRTUAL_ADDRESS cbAddress = mObjectCB->Resource()->GetGPUVirtualAddress();
+        D3D12_GPU_VIRTUAL_ADDRESS cbBaseAddress = mObjectCB->Resource()->GetGPUVirtualAddress();
         // Offset to the ith object constant buffer in the buffer.
-        int boxCBufIndex = 0;
-        cbAddress += boxCBufIndex * objCBByteSize;
+        for (UINT32 cbIndex = 0; cbIndex < numberOfConstantBuffer; ++cbIndex)
+        {
+            D3D12_GPU_VIRTUAL_ADDRESS cbAddress = cbBaseAddress + cbIndex * objCBByteSize;
+            
+            D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc;
+            cbvDesc.BufferLocation = cbAddress;
+            cbvDesc.SizeInBytes = objCBByteSize;
 
-        D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc;
-        cbvDesc.BufferLocation = cbAddress;
-        cbvDesc.SizeInBytes = objCBByteSize;
+            CD3DX12_CPU_DESCRIPTOR_HANDLE viewHandle(mCbvHeap->GetCPUDescriptorHandleForHeapStart(), cbIndex, mCbvSrvUavDescriptorSize);
 
-        md3dDevice->CreateConstantBufferView(
-            &cbvDesc,
-            mCbvHeap->GetCPUDescriptorHandleForHeapStart());
-    }
-
-    // 创建global constant buffer及描述符
-    {
-        mGlobalCB = std::make_unique<UploadBuffer<GlobalConstants>>(md3dDevice.Get(), 1, true);
-        
-        D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc;
-        cbvDesc.BufferLocation = mGlobalCB->Resource()->GetGPUVirtualAddress();
-        cbvDesc.SizeInBytes = mGlobalCB->ElementByteSize();
-
-        CD3DX12_CPU_DESCRIPTOR_HANDLE descriptorHandle(mCbvHeap->GetCPUDescriptorHandleForHeapStart(), 1, mCbvSrvUavDescriptorSize);
-        md3dDevice->CreateConstantBufferView(&cbvDesc, descriptorHandle);
+            md3dDevice->CreateConstantBufferView(&cbvDesc, viewHandle);
+        }
     }
 }
 
@@ -419,14 +435,14 @@ void BoxApp::BuildRootSignature()
     // thought of as defining the function signature.  
 
     // 第1步：创建shader中常量缓冲区对应的根参数
-
+    
     // Root parameter can be a table, root descriptor or root constants.
-    CD3DX12_ROOT_PARAMETER slotRootParameter[2];
+    CD3DX12_ROOT_PARAMETER slotRootParameter[1];
     {
         // Create a single descriptor table of CBVs.
         CD3DX12_DESCRIPTOR_RANGE cbvTable;
         // 指定两个描述符
-        cbvTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 2, 0);
+        cbvTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 0);
         slotRootParameter[0].InitAsDescriptorTable(1, &cbvTable);
     }
 
@@ -623,6 +639,55 @@ void BoxApp::BuildBoxGeometryMultiVertexBuffers()
     
 }
 #endif
+
+void BoxApp::BuildPyramidGeometry()
+{
+    std::array<Vertex, 5> vertices =
+    {
+        Vertex({ XMFLOAT3(-1.0f, 0, -1.0f), XMFLOAT4(Colors::Green) }),
+        Vertex({ XMFLOAT3(-1.0f, 0, 1.0f), XMFLOAT4(Colors::Green) }),
+        Vertex({ XMFLOAT3(+1.0f, 0, 1.0f), XMFLOAT4(Colors::Green) }),
+        Vertex({ XMFLOAT3(+1.0f, 0, -1.0f), XMFLOAT4(Colors::Green) }),
+        Vertex({ XMFLOAT3(0, 2, 0), XMFLOAT4(Colors::Red) }),
+        
+    };
+
+    std::array<std::uint16_t, 18> indices =
+    {
+        1, 4, 0, 
+        4, 3, 0, 
+        3, 4, 2, 
+        2, 4, 1, 
+        1, 3, 2, 
+        1, 0, 3,
+    };
+
+    const UINT vbByteSize = (UINT)vertices.size() * sizeof(Vertex);
+    const UINT ibByteSize = (UINT)indices.size() * sizeof(std::uint16_t);
+
+    mPyramidGeo = std::make_unique<MeshGeometry>();
+    mPyramidGeo->Name = "pyramidGeo";
+
+    // 创建顶点缓冲区ID3D12Resource资源堆与上传堆
+    mPyramidGeo->VertexBufferGPU = d3dUtil::CreateDefaultBuffer(md3dDevice.Get(),
+        mCommandList.Get(), vertices.data(), vbByteSize, mPyramidGeo->VertexBufferUploader);
+
+    // 创建索引缓冲区ID3D12Resource资源堆与上传堆
+    mPyramidGeo->IndexBufferGPU = d3dUtil::CreateDefaultBuffer(md3dDevice.Get(),
+        mCommandList.Get(), indices.data(), ibByteSize, mPyramidGeo->IndexBufferUploader);
+
+    mPyramidGeo->VertexByteStride = sizeof(Vertex);
+    mPyramidGeo->VertexBufferByteSize = vbByteSize;
+    mPyramidGeo->IndexFormat = DXGI_FORMAT_R16_UINT;
+    mPyramidGeo->IndexBufferByteSize = ibByteSize;
+
+    SubmeshGeometry submesh;
+    submesh.IndexCount = (UINT)indices.size();
+    submesh.StartIndexLocation = 0;
+    submesh.BaseVertexLocation = 0;
+
+    mPyramidGeo->DrawArgs["pyramid"] = submesh;
+}
 
 /**
  * 创建PSO对象。
