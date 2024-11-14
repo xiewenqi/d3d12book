@@ -1,4 +1,4 @@
-﻿//***************************************************************************************
+//***************************************************************************************
 // d3dApp.cpp by Frank Luna (C) 2015 All Rights Reserved.
 //***************************************************************************************
 
@@ -416,16 +416,19 @@ bool D3DApp::InitMainWindow()
 
 bool D3DApp::InitDirect3D()
 {
+	UINT dxgiFactoryFlags = 0;
 #if defined(DEBUG) || defined(_DEBUG) 
 	// Enable the D3D12 debug layer.
 {
 	ComPtr<ID3D12Debug> debugController;
 	ThrowIfFailed(D3D12GetDebugInterface(IID_PPV_ARGS(&debugController)));
 	debugController->EnableDebugLayer();
+
+	dxgiFactoryFlags |= DXGI_CREATE_FACTORY_DEBUG;
 }
 #endif
 
-	ThrowIfFailed(CreateDXGIFactory1(IID_PPV_ARGS(&mdxgiFactory)));
+	ThrowIfFailed(CreateDXGIFactory2(dxgiFactoryFlags, IID_PPV_ARGS(&mdxgiFactory)));
 
 	// Try to create hardware device.
 	HRESULT hardwareResult = D3D12CreateDevice(
