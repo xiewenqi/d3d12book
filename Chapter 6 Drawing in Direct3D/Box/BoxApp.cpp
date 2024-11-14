@@ -37,7 +37,12 @@ struct VertexColorData
 struct ObjectConstants
 {
     XMFLOAT4X4 WorldViewProj = MathHelper::Identity4x4();
-    float gTime;
+    float CurrentTime;
+};
+
+struct GlobalConstants
+{
+    float GlobalTime;
 };
 
 class BoxApp : public D3DApp
@@ -76,6 +81,8 @@ private:
     ComPtr<ID3D12DescriptorHeap> mCbvHeap = nullptr;
 
     std::unique_ptr<UploadBuffer<ObjectConstants>> mObjectCB = nullptr;
+
+    std::unique_ptr<UploadBuffer<GlobalConstants>> mGlobalCB = nullptr;
 
 #if USING_SINGLE_VERTEX_BUFFER
 	std::unique_ptr<MeshGeometry> mBoxGeo = nullptr;
@@ -205,8 +212,14 @@ void BoxApp::Update(const GameTimer& gt)
 	// Update the constant buffer with the latest worldViewProj matrix.
 	ObjectConstants objConstants;
     XMStoreFloat4x4(&objConstants.WorldViewProj, XMMatrixTranspose(worldViewProj));
-    objConstants.gTime = mTimer.TotalTime();
+    objConstants.CurrentTime = mTimer.TotalTime();
     mObjectCB->CopyData(0, objConstants);
+
+    // Update the global buffer with current time from GameTimer
+    GlobalConstants globalConstants;
+    globalConstants.GlobalTime = mTimer.TotalTime();
+    mGlobalCB->CopyData(0, globalConstants);
+
 }
 
 void BoxApp::Draw(const GameTimer& gt)
@@ -348,7 +361,7 @@ void BoxApp::OnMouseMove(WPARAM btnState, int x, int y)
 void BoxApp::BuildDescriptorHeaps()
 {
     D3D12_DESCRIPTOR_HEAP_DESC cbvHeapDesc;
-    cbvHeapDesc.NumDescriptors = 1;
+    cbvHeapDesc.NumDescriptors = 2;
     cbvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     cbvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
 	cbvHeapDesc.NodeMask = 0;
@@ -361,22 +374,37 @@ void BoxApp::BuildDescriptorHeaps()
  */
 void BoxApp::BuildConstantBuffers()
 {
-	mObjectCB = std::make_unique<UploadBuffer<ObjectConstants>>(md3dDevice.Get(), 1, true);
+    // 创建object constant buffer及描述符
+    {
+        mObjectCB = std::make_unique<UploadBuffer<ObjectConstants>>(md3dDevice.Get(), 1, true);
 
-	UINT objCBByteSize = d3dUtil::CalcConstantBufferByteSize(sizeof(ObjectConstants));
+        UINT objCBByteSize = mObjectCB->ElementByteSize();
 
-	D3D12_GPU_VIRTUAL_ADDRESS cbAddress = mObjectCB->Resource()->GetGPUVirtualAddress();
-    // Offset to the ith object constant buffer in the buffer.
-    int boxCBufIndex = 0;
-	cbAddress += boxCBufIndex*objCBByteSize;
+        D3D12_GPU_VIRTUAL_ADDRESS cbAddress = mObjectCB->Resource()->GetGPUVirtualAddress();
+        // Offset to the ith object constant buffer in the buffer.
+        int boxCBufIndex = 0;
+        cbAddress += boxCBufIndex * objCBByteSize;
 
-	D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc;
-	cbvDesc.BufferLocation = cbAddress;
-	cbvDesc.SizeInBytes = d3dUtil::CalcConstantBufferByteSize(sizeof(ObjectConstants));
+        D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc;
+        cbvDesc.BufferLocation = cbAddress;
+        cbvDesc.SizeInBytes = objCBByteSize;
 
-	md3dDevice->CreateConstantBufferView(
-		&cbvDesc,
-		mCbvHeap->GetCPUDescriptorHandleForHeapStart());
+        md3dDevice->CreateConstantBufferView(
+            &cbvDesc,
+            mCbvHeap->GetCPUDescriptorHandleForHeapStart());
+    }
+
+    // 创建global constant buffer及描述符
+    {
+        mGlobalCB = std::make_unique<UploadBuffer<GlobalConstants>>(md3dDevice.Get(), 1, true);
+        
+        D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc;
+        cbvDesc.BufferLocation = mGlobalCB->Resource()->GetGPUVirtualAddress();
+        cbvDesc.SizeInBytes = mGlobalCB->ElementByteSize();
+
+        CD3DX12_CPU_DESCRIPTOR_HANDLE descriptorHandle(mCbvHeap->GetCPUDescriptorHandleForHeapStart(), 1, mCbvSrvUavDescriptorSize);
+        md3dDevice->CreateConstantBufferView(&cbvDesc, descriptorHandle);
+    }
 }
 
 /**
@@ -393,11 +421,12 @@ void BoxApp::BuildRootSignature()
     // 第1步：创建shader中常量缓冲区对应的根参数
 
     // Root parameter can be a table, root descriptor or root constants.
-    CD3DX12_ROOT_PARAMETER slotRootParameter[1];
+    CD3DX12_ROOT_PARAMETER slotRootParameter[2];
     {
         // Create a single descriptor table of CBVs.
         CD3DX12_DESCRIPTOR_RANGE cbvTable;
-        cbvTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 0);
+        // 指定两个描述符
+        cbvTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 2, 0);
         slotRootParameter[0].InitAsDescriptorTable(1, &cbvTable);
     }
 
