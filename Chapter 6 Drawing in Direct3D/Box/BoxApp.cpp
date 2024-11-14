@@ -101,8 +101,6 @@ private:
     UINT mIndexCount = 0;
 #endif
 
-    std::unique_ptr<MeshGeometry> mPyramidGeo = nullptr;
-
     ComPtr<ID3DBlob> mvsByteCode = nullptr;
     ComPtr<ID3DBlob> mpsByteCode = nullptr;
 
@@ -119,6 +117,12 @@ private:
     float mTheta = 1.5f*XM_PI;
     float mPhi = XM_PIDIV4;
     float mRadius = 6.0f;
+
+    const int BoxVertexCount = 8;
+    const int BoxIndexCount = 36;
+
+    const int PyramidVertexCount = 5;
+    const int PyramidIndexCount = 18;
 
     POINT mLastMousePos;
 };
@@ -172,7 +176,6 @@ bool BoxApp::Initialize()
 #else
     BuildBoxGeometryMultiVertexBuffers();
 #endif
-    BuildPyramidGeometry();
     BuildPSO();
 
     // Execute the initialization commands.
@@ -275,10 +278,9 @@ void BoxApp::Draw(const GameTimer& gt)
 #if USING_SINGLE_VERTEX_BUFFER
 	mCommandList->IASetVertexBuffers(0, 1, &mBoxGeo->VertexBufferView());
     mCommandList->IASetIndexBuffer(&mBoxGeo->IndexBufferView());
-
+    SubmeshGeometry boxSubGeo = mBoxGeo->DrawArgs["box"];
     mCommandList->DrawIndexedInstanced(
-		mBoxGeo->DrawArgs["box"].IndexCount, 
-		1, 0, 0, 0);
+		boxSubGeo.IndexCount, 1, boxSubGeo.StartIndexLocation, boxSubGeo.BaseVertexLocation, 0);
 #else
     // 位置顶点缓冲区与颜色顶点缓冲区视图
     D3D12_VERTEX_BUFFER_VIEW posAndColorBufferViews[2] = {
@@ -306,12 +308,11 @@ void BoxApp::Draw(const GameTimer& gt)
     mCommandList->DrawIndexedInstanced(mIndexCount, 1, 0, 0, 0);
 #endif
 
-    // 绘制金字塔
+    // 绘制金字塔，此时VB/IB与立方体是共享的，但wvp矩阵常量缓冲区仍然单独指定
     CD3DX12_GPU_DESCRIPTOR_HANDLE pyrimidViewHandle(mCbvHeap->GetGPUDescriptorHandleForHeapStart(), 1, mCbvSrvUavDescriptorSize);
     mCommandList->SetGraphicsRootDescriptorTable(0, pyrimidViewHandle);
-    mCommandList->IASetVertexBuffers(0, 1, &mPyramidGeo->VertexBufferView());
-    mCommandList->IASetIndexBuffer(&mPyramidGeo->IndexBufferView());
-    mCommandList->DrawIndexedInstanced(mPyramidGeo->DrawArgs["pyramid"].IndexCount, 1, 0, 0, 0);
+    SubmeshGeometry pyramidSubGeo = mBoxGeo->DrawArgs["pyramid"];
+    mCommandList->DrawIndexedInstanced(pyramidSubGeo.IndexCount, 1, pyramidSubGeo.StartIndexLocation, pyramidSubGeo.BaseVertexLocation, 0);
 	
     // Indicate a state transition on the resource usage.
 	mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(CurrentBackBuffer(),
@@ -401,7 +402,7 @@ void BoxApp::BuildConstantBuffers()
     // 创建object constant buffer及描述符
     {
         // 创建两个上传堆及对应的描述符，一个给立方体，一个给金字塔
-        int numberOfConstantBuffer = 2;
+        UINT numberOfConstantBuffer = 2;
         mObjectCB = std::make_unique<UploadBuffer<ObjectConstants>>(md3dDevice.Get(), numberOfConstantBuffer, true);
 
         UINT objCBByteSize = mObjectCB->ElementByteSize();
@@ -503,8 +504,9 @@ void BoxApp::BuildShadersAndInputLayout()
  */
 void BoxApp::BuildBoxGeometry()
 {
-    std::array<Vertex, 8> vertices =
+    std::array<Vertex, 13> vertices =
     {
+        // first 8 for box
         Vertex({ XMFLOAT3(-1.0f, -1.0f, -1.0f), XMFLOAT4(Colors::White) }),
 		Vertex({ XMFLOAT3(-1.0f, +1.0f, -1.0f), XMFLOAT4(Colors::Black) }),
 		Vertex({ XMFLOAT3(+1.0f, +1.0f, -1.0f), XMFLOAT4(Colors::Red) }),
@@ -512,11 +514,20 @@ void BoxApp::BuildBoxGeometry()
 		Vertex({ XMFLOAT3(-1.0f, -1.0f, +1.0f), XMFLOAT4(Colors::Blue) }),
 		Vertex({ XMFLOAT3(-1.0f, +1.0f, +1.0f), XMFLOAT4(Colors::Yellow) }),
 		Vertex({ XMFLOAT3(+1.0f, +1.0f, +1.0f), XMFLOAT4(Colors::Cyan) }),
-		Vertex({ XMFLOAT3(+1.0f, -1.0f, +1.0f), XMFLOAT4(Colors::Magenta) })
+        Vertex({ XMFLOAT3(+1.0f, -1.0f, +1.0f), XMFLOAT4(Colors::Magenta) }),
+
+        // then 5 for pyramid
+        Vertex({ XMFLOAT3(-1.0f, 0, -1.0f), XMFLOAT4(Colors::Green) }),
+        Vertex({ XMFLOAT3(-1.0f, 0, 1.0f), XMFLOAT4(Colors::Green) }),
+        Vertex({ XMFLOAT3(+1.0f, 0, 1.0f), XMFLOAT4(Colors::Green) }),
+        Vertex({ XMFLOAT3(+1.0f, 0, -1.0f), XMFLOAT4(Colors::Green) }),
+        Vertex({ XMFLOAT3(0, 2, 0), XMFLOAT4(Colors::Red) })
     };
 
-	std::array<std::uint16_t, 36> indices =
+	std::array<std::uint16_t, 54> indices =
 	{
+        // first 36 for box
+
 		// front face
 		0, 1, 2,
 		0, 2, 3,
@@ -539,7 +550,15 @@ void BoxApp::BuildBoxGeometry()
 
 		// bottom face
 		4, 0, 3,
-		4, 3, 7
+		4, 3, 7,
+
+        // then 18 for pymarid
+        1, 4, 0,
+        4, 3, 0,
+        3, 4, 2,
+        2, 4, 1,
+        1, 3, 2,
+        1, 0, 3,
 	};
 
     const UINT vbByteSize = (UINT)vertices.size() * sizeof(Vertex);
@@ -568,12 +587,17 @@ void BoxApp::BuildBoxGeometry()
 	mBoxGeo->IndexFormat = DXGI_FORMAT_R16_UINT;
 	mBoxGeo->IndexBufferByteSize = ibByteSize;
 
-	SubmeshGeometry submesh;
-	submesh.IndexCount = (UINT)indices.size();
-	submesh.StartIndexLocation = 0;
-	submesh.BaseVertexLocation = 0;
+	SubmeshGeometry boxSubmesh;
+    boxSubmesh.IndexCount = BoxIndexCount;
+    boxSubmesh.StartIndexLocation = 0;
+    boxSubmesh.BaseVertexLocation = 0;
+	mBoxGeo->DrawArgs["box"] = boxSubmesh;
 
-	mBoxGeo->DrawArgs["box"] = submesh;
+    SubmeshGeometry pyramidSubmesh;
+    pyramidSubmesh.IndexCount = PyramidIndexCount;
+    pyramidSubmesh.StartIndexLocation = boxSubmesh.IndexCount;
+    pyramidSubmesh.BaseVertexLocation = BoxVertexCount;
+    mBoxGeo->DrawArgs["pyramid"] = pyramidSubmesh;
 }
 #else
 void BoxApp::BuildBoxGeometryMultiVertexBuffers()
@@ -639,55 +663,6 @@ void BoxApp::BuildBoxGeometryMultiVertexBuffers()
     
 }
 #endif
-
-void BoxApp::BuildPyramidGeometry()
-{
-    std::array<Vertex, 5> vertices =
-    {
-        Vertex({ XMFLOAT3(-1.0f, 0, -1.0f), XMFLOAT4(Colors::Green) }),
-        Vertex({ XMFLOAT3(-1.0f, 0, 1.0f), XMFLOAT4(Colors::Green) }),
-        Vertex({ XMFLOAT3(+1.0f, 0, 1.0f), XMFLOAT4(Colors::Green) }),
-        Vertex({ XMFLOAT3(+1.0f, 0, -1.0f), XMFLOAT4(Colors::Green) }),
-        Vertex({ XMFLOAT3(0, 2, 0), XMFLOAT4(Colors::Red) }),
-        
-    };
-
-    std::array<std::uint16_t, 18> indices =
-    {
-        1, 4, 0, 
-        4, 3, 0, 
-        3, 4, 2, 
-        2, 4, 1, 
-        1, 3, 2, 
-        1, 0, 3,
-    };
-
-    const UINT vbByteSize = (UINT)vertices.size() * sizeof(Vertex);
-    const UINT ibByteSize = (UINT)indices.size() * sizeof(std::uint16_t);
-
-    mPyramidGeo = std::make_unique<MeshGeometry>();
-    mPyramidGeo->Name = "pyramidGeo";
-
-    // 创建顶点缓冲区ID3D12Resource资源堆与上传堆
-    mPyramidGeo->VertexBufferGPU = d3dUtil::CreateDefaultBuffer(md3dDevice.Get(),
-        mCommandList.Get(), vertices.data(), vbByteSize, mPyramidGeo->VertexBufferUploader);
-
-    // 创建索引缓冲区ID3D12Resource资源堆与上传堆
-    mPyramidGeo->IndexBufferGPU = d3dUtil::CreateDefaultBuffer(md3dDevice.Get(),
-        mCommandList.Get(), indices.data(), ibByteSize, mPyramidGeo->IndexBufferUploader);
-
-    mPyramidGeo->VertexByteStride = sizeof(Vertex);
-    mPyramidGeo->VertexBufferByteSize = vbByteSize;
-    mPyramidGeo->IndexFormat = DXGI_FORMAT_R16_UINT;
-    mPyramidGeo->IndexBufferByteSize = ibByteSize;
-
-    SubmeshGeometry submesh;
-    submesh.IndexCount = (UINT)indices.size();
-    submesh.StartIndexLocation = 0;
-    submesh.BaseVertexLocation = 0;
-
-    mPyramidGeo->DrawArgs["pyramid"] = submesh;
-}
 
 /**
  * 创建PSO对象。
