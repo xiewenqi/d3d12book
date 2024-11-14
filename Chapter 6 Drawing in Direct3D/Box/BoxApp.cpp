@@ -16,9 +16,21 @@ using Microsoft::WRL::ComPtr;
 using namespace DirectX;
 using namespace DirectX::PackedVector;
 
+#define USING_SINGLE_VERTEX_BUFFER 0
+
 struct Vertex
 {
     XMFLOAT3 Pos;
+    XMFLOAT4 Color;
+};
+
+struct VertexPosData
+{
+    XMFLOAT3 Pos;
+};
+
+struct VertexColorData
+{
     XMFLOAT4 Color;
 };
 
@@ -50,7 +62,11 @@ private:
 	void BuildConstantBuffers();
     void BuildRootSignature();
     void BuildShadersAndInputLayout();
+#if USING_SINGLE_VERTEX_BUFFER
     void BuildBoxGeometry();
+#else
+    void BuildBoxGeometryMultiVertexBuffers();
+#endif
     void BuildPSO();
 
 private:
@@ -60,7 +76,22 @@ private:
 
     std::unique_ptr<UploadBuffer<ObjectConstants>> mObjectCB = nullptr;
 
+#if USING_SINGLE_VERTEX_BUFFER
 	std::unique_ptr<MeshGeometry> mBoxGeo = nullptr;
+#else
+    ComPtr<ID3D12Resource> mVertexBufferPosGPU = nullptr;
+    ComPtr<ID3D12Resource> mVertexBufferPosUploader = nullptr;
+    UINT mVertexBufferPosSize = 0;
+    
+    ComPtr<ID3D12Resource> mVertexBufferColorGPU = nullptr;
+    ComPtr<ID3D12Resource> mVertexBufferColorUploader = nullptr;
+    UINT mVertexBufferColorSize = 0;
+
+    ComPtr<ID3D12Resource> mIndexBufferGPU = nullptr;
+    ComPtr<ID3D12Resource> mIndexBufferUploader = nullptr;
+    UINT mIndexBufferSize = 0;
+    UINT mIndexCount = 0;
+#endif
 
     ComPtr<ID3DBlob> mvsByteCode = nullptr;
     ComPtr<ID3DBlob> mpsByteCode = nullptr;
@@ -124,7 +155,11 @@ bool BoxApp::Initialize()
 	BuildConstantBuffers();
     BuildRootSignature();
     BuildShadersAndInputLayout();
+#if USING_SINGLE_VERTEX_BUFFER
     BuildBoxGeometry();
+#else
+    BuildBoxGeometryMultiVertexBuffers();
+#endif
     BuildPSO();
 
     // Execute the initialization commands.
@@ -197,20 +232,47 @@ void BoxApp::Draw(const GameTimer& gt)
     // Specify the buffers we are going to render to.
 	mCommandList->OMSetRenderTargets(1, &CurrentBackBufferView(), true, &DepthStencilView());
 
+    mCommandList->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
 	ID3D12DescriptorHeap* descriptorHeaps[] = { mCbvHeap.Get() };
 	mCommandList->SetDescriptorHeaps(_countof(descriptorHeaps), descriptorHeaps);
 
 	mCommandList->SetGraphicsRootSignature(mRootSignature.Get());
-
-	mCommandList->IASetVertexBuffers(0, 1, &mBoxGeo->VertexBufferView());
-	mCommandList->IASetIndexBuffer(&mBoxGeo->IndexBufferView());
-    mCommandList->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    
     mCommandList->SetGraphicsRootDescriptorTable(0, mCbvHeap->GetGPUDescriptorHandleForHeapStart());
+
+#if USING_SINGLE_VERTEX_BUFFER
+	mCommandList->IASetVertexBuffers(0, 1, &mBoxGeo->VertexBufferView());
+    mCommandList->IASetIndexBuffer(&mBoxGeo->IndexBufferView());
 
     mCommandList->DrawIndexedInstanced(
 		mBoxGeo->DrawArgs["box"].IndexCount, 
 		1, 0, 0, 0);
+#else
+    // 位置顶点缓冲区与颜色顶点缓冲区视图
+    D3D12_VERTEX_BUFFER_VIEW posAndColorBufferViews[2] = {
+        {
+            mVertexBufferPosGPU->GetGPUVirtualAddress(),
+            mVertexBufferPosSize,
+            sizeof(VertexPosData)
+        },
+        {
+            mVertexBufferColorGPU->GetGPUVirtualAddress(),
+            mVertexBufferColorSize,
+            sizeof(VertexColorData)
+        },
+    };
+    mCommandList->IASetVertexBuffers(0, 2, posAndColorBufferViews);
+
+        // 索引缓冲区视图
+    D3D12_INDEX_BUFFER_VIEW indexBufferView = {
+        mIndexBufferGPU->GetGPUVirtualAddress(),
+        mIndexBufferSize,
+        DXGI_FORMAT_R16_UINT
+    };
+    mCommandList->IASetIndexBuffer(&indexBufferView);
+
+    mCommandList->DrawIndexedInstanced(mIndexCount, 1, 0, 0, 0);
+#endif
 	
     // Indicate a state transition on the resource usage.
 	mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(CurrentBackBuffer(),
@@ -373,14 +435,22 @@ void BoxApp::BuildShadersAndInputLayout()
     
 	mvsByteCode = d3dUtil::CompileShader(L"Shaders\\color.hlsl", nullptr, "VS", "vs_5_0");
 	mpsByteCode = d3dUtil::CompileShader(L"Shaders\\color.hlsl", nullptr, "PS", "ps_5_0");
-
+#if USING_SINGLE_VERTEX_BUFFER
     mInputLayout =
     {
         { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
         { "COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
     };
+#else
+    mInputLayout =
+    {
+        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
+    };
+#endif
 }
 
+#if USING_SINGLE_VERTEX_BUFFER
 /** 
  * 创建顶点缓冲区/索引缓冲区的资源对象（ID3D12Resource）与上传堆；
  */
@@ -458,6 +528,70 @@ void BoxApp::BuildBoxGeometry()
 
 	mBoxGeo->DrawArgs["box"] = submesh;
 }
+#else
+void BoxApp::BuildBoxGeometryMultiVertexBuffers()
+{
+    std::array<VertexPosData, 8> verticesPos =
+    {
+        VertexPosData({ XMFLOAT3(-1.0f, -1.0f, -1.0f) }),
+        VertexPosData({ XMFLOAT3(-1.0f, +1.0f, -1.0f) }),
+        VertexPosData({ XMFLOAT3(+1.0f, +1.0f, -1.0f) }),
+        VertexPosData({ XMFLOAT3(+1.0f, -1.0f, -1.0f) }),
+        VertexPosData({ XMFLOAT3(-1.0f, -1.0f, +1.0f) }),
+        VertexPosData({ XMFLOAT3(-1.0f, +1.0f, +1.0f) }),
+        VertexPosData({ XMFLOAT3(+1.0f, +1.0f, +1.0f) }),
+        VertexPosData({ XMFLOAT3(+1.0f, -1.0f, +1.0f) })
+    };
+    mVertexBufferPosSize = (UINT)verticesPos.size() * sizeof(VertexPosData);
+    mVertexBufferPosGPU = d3dUtil::CreateDefaultBuffer(md3dDevice.Get(), mCommandList.Get(), verticesPos.data(), mVertexBufferPosSize, mVertexBufferPosUploader);
+
+
+    std::array<VertexColorData, 8> verticesColor =
+    {
+        VertexColorData({ XMFLOAT4(Colors::White) }),
+        VertexColorData({ XMFLOAT4(Colors::Black) }),
+        VertexColorData({ XMFLOAT4(Colors::Red) }),
+        VertexColorData({ XMFLOAT4(Colors::Green) }),
+        VertexColorData({ XMFLOAT4(Colors::Blue) }),
+        VertexColorData({ XMFLOAT4(Colors::Yellow) }),
+        VertexColorData({ XMFLOAT4(Colors::Cyan) }),
+        VertexColorData({ XMFLOAT4(Colors::Magenta) })
+    };
+    mVertexBufferColorSize = (UINT)verticesColor.size() * sizeof(VertexColorData);
+    mVertexBufferColorGPU = d3dUtil::CreateDefaultBuffer(md3dDevice.Get(), mCommandList.Get(), verticesColor.data(), mVertexBufferColorSize, mVertexBufferColorUploader);
+
+    std::array<std::uint16_t, 36> indices =
+    {
+        // front face
+        0, 1, 2,
+        0, 2, 3,
+
+        // back face
+        4, 6, 5,
+        4, 7, 6,
+
+        // left face
+        4, 5, 1,
+        4, 1, 0,
+
+        // right face
+        3, 2, 6,
+        3, 6, 7,
+
+        // top face
+        1, 5, 6,
+        1, 6, 2,
+
+        // bottom face
+        4, 0, 3,
+        4, 3, 7
+    };
+    mIndexCount = (UINT)indices.size();
+    mIndexBufferSize = mIndexCount * sizeof(std::uint16_t);
+    mIndexBufferGPU = d3dUtil::CreateDefaultBuffer(md3dDevice.Get(), mCommandList.Get(), indices.data(), mIndexBufferSize, mIndexBufferUploader);
+    
+}
+#endif
 
 /**
  * 创建PSO对象。
