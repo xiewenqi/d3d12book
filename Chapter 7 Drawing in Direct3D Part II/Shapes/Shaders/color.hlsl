@@ -6,7 +6,25 @@
  
 cbuffer cbPerObject : register(b0)
 {
-	float4x4 gWorld; 
+    float m00;
+    float m01;
+    float m02;
+    float m03;
+
+    float m10;
+    float m11;
+    float m12;
+    float m13;
+
+    float m20;
+    float m21;
+    float m22;
+    float m23;
+
+    float m30;
+    float m31;
+    float m32;
+    float m33;
 };
 
 cbuffer cbPass : register(b1)
@@ -44,6 +62,16 @@ VertexOut VS(VertexIn vin)
 	VertexOut vout;
 	
 	// Transform to homogeneous clip space.
+
+    // C++侧传入的仍然是行主序的矩阵，我们手动构造时不用转置，否则就错啦。
+    // 用floatNxN/matrix解析寄存器中的矩阵时，才需要转置。
+    float4x4 gWorld = float4x4(
+        m00, m01, m02, m03,
+        m10, m11, m12, m13,
+        m20, m21, m22, m23,
+        m30, m31, m32, m33
+    );
+
     float4 posW = mul(float4(vin.PosL, 1.0f), gWorld);
     vout.PosH = mul(posW, gViewProj);
 	

@@ -356,6 +356,7 @@ void ShapesApp::UpdateCamera(const GameTimer& gt)
 
 void ShapesApp::UpdateObjectCBs(const GameTimer& gt)
 {
+    /*
 	auto currObjectCB = mCurrFrameResource->ObjectCB.get();
 	for(auto& e : mAllRitems)
 	{
@@ -374,6 +375,7 @@ void ShapesApp::UpdateObjectCBs(const GameTimer& gt)
 			e->NumFramesDirty--;
 		}
 	}
+    */
 }
 
 void ShapesApp::UpdateMainPassCB(const GameTimer& gt)
@@ -406,7 +408,9 @@ void ShapesApp::UpdateMainPassCB(const GameTimer& gt)
 
 void ShapesApp::BuildDescriptorHeaps()
 {
-    UINT objCount = (UINT)mOpaqueRitems.size();
+    // 只保留3个passConstants用的描述符就好
+
+    UINT objCount = 0;
 
     // Need a CBV descriptor for each object for each frame resource,
     // +1 for the perPass CBV for each frame resource.
@@ -426,6 +430,7 @@ void ShapesApp::BuildDescriptorHeaps()
 
 void ShapesApp::BuildConstantBufferViews()
 {
+    /*
     UINT objCBByteSize = d3dUtil::CalcConstantBufferByteSize(sizeof(ObjectConstants));
 
     UINT objCount = (UINT)mOpaqueRitems.size();
@@ -453,6 +458,7 @@ void ShapesApp::BuildConstantBufferViews()
             md3dDevice->CreateConstantBufferView(&cbvDesc, handle);
         }
     }
+    */
 
     UINT passCBByteSize = d3dUtil::CalcConstantBufferByteSize(sizeof(PassConstants));
 
@@ -477,9 +483,6 @@ void ShapesApp::BuildConstantBufferViews()
 
 void ShapesApp::BuildRootSignature()
 {
-    CD3DX12_DESCRIPTOR_RANGE cbvRange0;
-    cbvRange0.Init(D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 0);
-
     CD3DX12_DESCRIPTOR_RANGE cbvRange1;
     cbvRange1.Init(D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 1);
 
@@ -487,7 +490,7 @@ void ShapesApp::BuildRootSignature()
 	CD3DX12_ROOT_PARAMETER slotRootParameter[2];
 
 	// Create root CBVs.
-    slotRootParameter[0].InitAsDescriptorTable(1, &cbvRange0);
+    slotRootParameter[0].InitAsConstants(16, 0); // 物体的world矩阵用16个常量来构造
     slotRootParameter[1].InitAsDescriptorTable(1, &cbvRange1);
 
 	// A root signature is an array of root parameters.
@@ -695,8 +698,7 @@ void ShapesApp::BuildFrameResources()
 {
     for(int i = 0; i < gNumFrameResources; ++i)
     {
-        mFrameResources.push_back(std::make_unique<FrameResource>(md3dDevice.Get(),
-            1, (UINT)mAllRitems.size()));
+        mFrameResources.push_back(std::make_unique<FrameResource>(md3dDevice.Get(), 1, 0));
     }
 }
 
@@ -781,9 +783,12 @@ void ShapesApp::BuildRenderItems()
 
 void ShapesApp::DrawRenderItems(ID3D12GraphicsCommandList* cmdList, const std::vector<RenderItem*>& ritems)
 {
+    /*
     UINT objCBByteSize = d3dUtil::CalcConstantBufferByteSize(sizeof(ObjectConstants));
  
 	auto objectCB = mCurrFrameResource->ObjectCB->Resource();
+    */
+
 
     // For each render item...
     for(size_t i = 0; i < ritems.size(); ++i)
@@ -793,7 +798,7 @@ void ShapesApp::DrawRenderItems(ID3D12GraphicsCommandList* cmdList, const std::v
         cmdList->IASetVertexBuffers(0, 1, &ri->Geo->VertexBufferView());
         cmdList->IASetIndexBuffer(&ri->Geo->IndexBufferView());
         cmdList->IASetPrimitiveTopology(ri->PrimitiveType);
-
+        /*
         // Offset to the CBV in the descriptor heap for this object and for this frame resource.
         UINT cbvIndex = mCurrFrameResourceIndex*(UINT)mOpaqueRitems.size() + ri->ObjCBIndex;
         auto cbvHandle = CD3DX12_GPU_DESCRIPTOR_HANDLE(mCbvHeap->GetGPUDescriptorHandleForHeapStart());
@@ -801,6 +806,22 @@ void ShapesApp::DrawRenderItems(ID3D12GraphicsCommandList* cmdList, const std::v
 
         // 绑定cbPerObject，每个对象做一次
         cmdList->SetGraphicsRootDescriptorTable(0, cbvHandle);
+        */
+
+        // 这里涉及DirectX和HLSL中矩阵“行主序”、“列主序”的问题：
+        // 1. 在DirectX中，矩阵/向量都是“行主序”的，那么下面定义的elements缓冲区中，逐行填充矩阵中元素；
+        // 2. elements中数据上传到color.hlsl中定义的b0寄存器中，内存布局仍然不变，寄存器按“行主序”排列；
+        // 3. HLSL的matrix/floatNxN默认都是按“列主序”分布的。使用matrix/floatNxN解析寄存器中的值时，会以“列主序”解析；
+
+        XMMATRIX worldMatrix = XMLoadFloat4x4(&ri->World);
+        float elements[16] = { 
+            XMVectorGetX(worldMatrix.r[0]), XMVectorGetY(worldMatrix.r[0]), XMVectorGetZ(worldMatrix.r[0]), XMVectorGetW(worldMatrix.r[0]),
+            XMVectorGetX(worldMatrix.r[1]), XMVectorGetY(worldMatrix.r[1]), XMVectorGetZ(worldMatrix.r[1]), XMVectorGetW(worldMatrix.r[1]),
+            XMVectorGetX(worldMatrix.r[2]), XMVectorGetY(worldMatrix.r[2]), XMVectorGetZ(worldMatrix.r[2]), XMVectorGetW(worldMatrix.r[2]),
+            XMVectorGetX(worldMatrix.r[3]), XMVectorGetY(worldMatrix.r[3]), XMVectorGetZ(worldMatrix.r[3]), XMVectorGetW(worldMatrix.r[3]),
+        };
+
+        cmdList->SetGraphicsRoot32BitConstants(0, 16, elements, 0);
 
         cmdList->DrawIndexedInstanced(ri->IndexCount, 1, ri->StartIndexLocation, ri->BaseVertexLocation, 0);
     }
