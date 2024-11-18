@@ -29,6 +29,7 @@ $RECYCLE.BIN/
 *.lastbuildstate
 *.idb
 /**/x64/Debug/**
+/**/x64/Release/**
 
 # =========================
 # Operating System Files
