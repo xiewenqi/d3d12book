@@ -99,6 +99,10 @@ private:
 	void MarkSamplerDirty();
 	void CreateSamplerDescriptor();
 
+	void BuildDefaultRootSignature();
+	void BuildFlareRootSignature();
+
+
 private:
 
     std::vector<std::unique_ptr<FrameResource>> mFrameResources;
@@ -108,6 +112,7 @@ private:
     UINT mCbvSrvDescriptorSize = 0;
 
     ComPtr<ID3D12RootSignature> mRootSignature = nullptr;
+	ComPtr<ID3D12RootSignature> mFlareRootSignature = nullptr;
 
 	ComPtr<ID3D12DescriptorHeap> mSrvDescriptorHeap = nullptr;
 
@@ -122,6 +127,10 @@ private:
 
     ComPtr<ID3D12PipelineState> mOpaquePSO = nullptr;
 	ComPtr<ID3D12PipelineState> mWireFramePSO = nullptr;
+
+	ComPtr<ID3D12PipelineState> mOpaqueFlarePSO = nullptr;
+	ComPtr<ID3D12PipelineState> mWireFrameFlarePSO = nullptr;
+
 	bool mOpaqueDraw = true;
  
 	// List of all the render items.
@@ -138,7 +147,7 @@ private:
 
 	float mTheta = 1.3f*XM_PI;
 	float mPhi = 0.4f*XM_PI;
-	float mRadius = 2.5f;
+	float mRadius = 5.0f;
 
     POINT mLastMousePos;
 
@@ -262,9 +271,8 @@ void CrateApp::Draw(const GameTimer& gt)
     ThrowIfFailed(cmdListAlloc->Reset());
 
     // A command list can be reset after it has been added to the command queue via ExecuteCommandList.
-    // Reusing the command list reuses memory.
-	ComPtr<ID3D12PipelineState> currentPSO = mOpaqueDraw ? mOpaquePSO : mWireFramePSO;
-    ThrowIfFailed(mCommandList->Reset(cmdListAlloc.Get(), currentPSO.Get()));
+    // Reusing the command list reuses memory.;
+    ThrowIfFailed(mCommandList->Reset(cmdListAlloc.Get(), nullptr));
 
     mCommandList->RSSetViewports(1, &mScreenViewport);
     mCommandList->RSSetScissorRects(1, &mScissorRect);
@@ -283,15 +291,116 @@ void CrateApp::Draw(const GameTimer& gt)
 	ID3D12DescriptorHeap* descriptorHeaps[] = { mSrvDescriptorHeap.Get(), mSamplerDescriptorHeap.Get() };
 	mCommandList->SetDescriptorHeaps(_countof(descriptorHeaps), descriptorHeaps);
 
-	mCommandList->SetGraphicsRootSignature(mRootSignature.Get());
-
+	// box和flare的根签名不一样啦，所以要分开绘制
 	auto passCB = mCurrFrameResource->PassCB->Resource();
-	mCommandList->SetGraphicsRootConstantBufferView(2, passCB->GetGPUVirtualAddress());
+	auto objectCB = mCurrFrameResource->ObjectCB->Resource();
+	auto matCB = mCurrFrameResource->MaterialCB->Resource();
 
-	// 我们的例子中，采样器是全局的
-	mCommandList->SetGraphicsRootDescriptorTable(4, mSamplerDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
+	UINT objCBByteSize = d3dUtil::CalcConstantBufferByteSize(sizeof(ObjectConstants));
+	UINT matCBByteSize = d3dUtil::CalcConstantBufferByteSize(sizeof(MaterialConstants));
 
-    DrawRenderItems(mCommandList.Get(), mOpaqueRitems);
+	// 绘制box
+	{
+		auto currentRenderItem = mOpaqueRitems[0];
+
+		// set pso
+		mCommandList->SetPipelineState(mOpaqueDraw ? mOpaquePSO.Get() : mWireFramePSO.Get());
+
+		// root signature
+		mCommandList->SetGraphicsRootSignature(mRootSignature.Get());
+
+		// cbPerObject
+		mCommandList->SetGraphicsRootConstantBufferView(2, passCB->GetGPUVirtualAddress());
+
+		// gsamLinear
+		mCommandList->SetGraphicsRootDescriptorTable(4, mSamplerDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
+
+		mCommandList->IASetVertexBuffers(0, 1, &currentRenderItem->Geo->VertexBufferView());
+		mCommandList->IASetIndexBuffer(&currentRenderItem->Geo->IndexBufferView());
+		mCommandList->IASetPrimitiveTopology(currentRenderItem->PrimitiveType);
+
+		// diffuse map
+		CD3DX12_GPU_DESCRIPTOR_HANDLE tex(mSrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
+		tex.Offset(currentRenderItem->Mat->DiffuseSrvHeapIndex, mCbvSrvDescriptorSize);
+
+		D3D12_GPU_VIRTUAL_ADDRESS objCBAddress = objectCB->GetGPUVirtualAddress() + currentRenderItem->ObjCBIndex * objCBByteSize;
+		D3D12_GPU_VIRTUAL_ADDRESS matCBAddress = matCB->GetGPUVirtualAddress() + currentRenderItem->Mat->MatCBIndex * matCBByteSize;
+
+		mCommandList->SetGraphicsRootDescriptorTable(0, tex);
+		mCommandList->SetGraphicsRootConstantBufferView(1, objCBAddress);
+		mCommandList->SetGraphicsRootConstantBufferView(3, matCBAddress);
+
+		mCommandList->DrawIndexedInstanced(currentRenderItem->IndexCount, 1, currentRenderItem->StartIndexLocation, currentRenderItem->BaseVertexLocation, 0);
+	}
+
+	// 绘制flare box
+	{
+		auto currentRenderItem = mOpaqueRitems[1];
+
+		// set pso
+		mCommandList->SetPipelineState(mOpaqueDraw ? mOpaqueFlarePSO.Get() : mWireFrameFlarePSO.Get());
+
+		// root signature
+		mCommandList->SetGraphicsRootSignature(mFlareRootSignature.Get());
+
+		// cbPerObject
+		mCommandList->SetGraphicsRootConstantBufferView(2, passCB->GetGPUVirtualAddress());
+
+		// gsamLinear
+		mCommandList->SetGraphicsRootDescriptorTable(4, mSamplerDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
+
+		mCommandList->IASetVertexBuffers(0, 1, &currentRenderItem->Geo->VertexBufferView());
+		mCommandList->IASetIndexBuffer(&currentRenderItem->Geo->IndexBufferView());
+		mCommandList->IASetPrimitiveTopology(currentRenderItem->PrimitiveType);
+
+		// diffuse map
+		CD3DX12_GPU_DESCRIPTOR_HANDLE tex(mSrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
+		tex.Offset(currentRenderItem->Mat->DiffuseSrvHeapIndex, mCbvSrvDescriptorSize);
+
+		D3D12_GPU_VIRTUAL_ADDRESS objCBAddress = objectCB->GetGPUVirtualAddress() + currentRenderItem->ObjCBIndex * objCBByteSize;
+		D3D12_GPU_VIRTUAL_ADDRESS matCBAddress = matCB->GetGPUVirtualAddress() + currentRenderItem->Mat->MatCBIndex * matCBByteSize;
+
+		mCommandList->SetGraphicsRootDescriptorTable(0, tex);
+		mCommandList->SetGraphicsRootConstantBufferView(1, objCBAddress);
+		mCommandList->SetGraphicsRootConstantBufferView(3, matCBAddress);
+
+		mCommandList->DrawIndexedInstanced(currentRenderItem->IndexCount, 1, currentRenderItem->StartIndexLocation, currentRenderItem->BaseVertexLocation, 0);
+	}
+
+	
+
+    // DrawRenderItems(mCommandList.Get(), mOpaqueRitems);
+	{
+		/*
+		UINT objCBByteSize = d3dUtil::CalcConstantBufferByteSize(sizeof(ObjectConstants));
+		UINT matCBByteSize = d3dUtil::CalcConstantBufferByteSize(sizeof(MaterialConstants));
+ 
+		auto objectCB = mCurrFrameResource->ObjectCB->Resource();
+		auto matCB = mCurrFrameResource->MaterialCB->Resource();
+
+		// For each render item...
+		for(size_t i = 0; i < ritems.size(); ++i)
+		{
+			auto ri = ritems[i];
+
+			cmdList->IASetVertexBuffers(0, 1, &ri->Geo->VertexBufferView());
+			cmdList->IASetIndexBuffer(&ri->Geo->IndexBufferView());
+			cmdList->IASetPrimitiveTopology(ri->PrimitiveType);
+
+			CD3DX12_GPU_DESCRIPTOR_HANDLE tex(mSrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
+			tex.Offset(ri->Mat->DiffuseSrvHeapIndex, mCbvSrvDescriptorSize);
+
+			D3D12_GPU_VIRTUAL_ADDRESS objCBAddress = objectCB->GetGPUVirtualAddress() + ri->ObjCBIndex*objCBByteSize;
+			D3D12_GPU_VIRTUAL_ADDRESS matCBAddress = matCB->GetGPUVirtualAddress() + ri->Mat->MatCBIndex*matCBByteSize;
+
+			cmdList->SetGraphicsRootDescriptorTable(0, tex);
+			cmdList->SetGraphicsRootConstantBufferView(1, objCBAddress);
+			cmdList->SetGraphicsRootConstantBufferView(3, matCBAddress);
+
+			cmdList->DrawIndexedInstanced(ri->IndexCount, 1, ri->StartIndexLocation, ri->BaseVertexLocation, 0);
+		}
+		*/
+	}
 
     // Indicate a state transition on the resource usage.
 	mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(CurrentBackBuffer(),
@@ -355,7 +464,7 @@ void CrateApp::OnMouseMove(WPARAM btnState, int x, int y)
         mRadius += dx - dy;
 
         // Restrict the radius.
-        mRadius = MathHelper::Clamp(mRadius, 2.5f, 150.0f);
+        mRadius = MathHelper::Clamp(mRadius, 5.0f, 150.0f);
     }
 
     mLastMousePos.x = x;
@@ -495,9 +604,20 @@ void CrateApp::UpdateCamera(const GameTimer& gt)
 	XMStoreFloat4x4(&mView, view);
 }
 
+
+
 void CrateApp::AnimateMaterials(const GameTimer& gt)
 {
+	auto item = mOpaqueRitems[1];
+
+	// 默认旋转是相对于UV的原点（左上角）进行的，我们需要让它相对于UV中心(0.5, 0.5)来旋转。
 	
+	// 先向左上方平移(0.5, 0.5)，然后旋转，再平移回原来的位置
+	XMMATRIX m1 = XMMatrixMultiply(XMMatrixTranslation(-0.5f, -0.5f, 0), XMMatrixRotationZ(1.0f * gt.TotalTime()));
+	XMMATRIX m2 = XMMatrixMultiply(m1, XMMatrixTranslation(0.5f, 0.5f, 0));
+	XMStoreFloat4x4(&item->TexTransform, m2);
+
+	item->NumFramesDirty = gNumFrameResources;
 }
 
 void CrateApp::UpdateObjectCBs(const GameTimer& gt)
@@ -596,17 +716,47 @@ void CrateApp::UpdateSampler(const GameTimer& gt)
 
 void CrateApp::LoadTextures()
 {
-	auto woodCrateTex = std::make_unique<Texture>();
-	woodCrateTex->Name = "woodCrateTex";
-	woodCrateTex->Filename = L"../../Textures/mipmaps.dds";
-	ThrowIfFailed(DirectX::CreateDDSTextureFromFile12(md3dDevice.Get(),
-		mCommandList.Get(), woodCrateTex->Filename.c_str(),
-		woodCrateTex->Resource, woodCrateTex->UploadHeap));
- 
-	mTextures[woodCrateTex->Name] = std::move(woodCrateTex);
+	// wood crate tex
+	{
+		auto woodCrateTex = std::make_unique<Texture>();
+		woodCrateTex->Name = "woodCrateTex";
+		woodCrateTex->Filename = L"../../Textures/mipmaps.dds";
+		ThrowIfFailed(DirectX::CreateDDSTextureFromFile12(md3dDevice.Get(),
+			mCommandList.Get(), woodCrateTex->Filename.c_str(),
+			woodCrateTex->Resource, woodCrateTex->UploadHeap));
+
+		mTextures[woodCrateTex->Name] = std::move(woodCrateTex);
+	}
+
+	// todo xiewneqi: 后面把wood crate tex 加回来，用键盘控制和mipmap的切换显示
+
+	// flare and flare-alpha
+	{
+		auto flareTex = std::make_unique<Texture>();
+		flareTex->Name = "flareTex";
+		flareTex->Filename = L"../../Textures/flare.dds";
+		ThrowIfFailed(DirectX::CreateDDSTextureFromFile12(md3dDevice.Get(),
+			mCommandList.Get(), flareTex->Filename.c_str(), 
+			flareTex->Resource, flareTex->UploadHeap));
+		mTextures[flareTex->Name] = std::move(flareTex);
+
+		auto flareAlphaTex = std::make_unique<Texture>();
+		flareAlphaTex->Name = "flareAlphaTex";
+		flareAlphaTex->Filename = L"../../Textures/flarealpha.dds";
+		ThrowIfFailed(DirectX::CreateDDSTextureFromFile12(md3dDevice.Get(),
+			mCommandList.Get(), flareAlphaTex->Filename.c_str(),
+			flareAlphaTex->Resource, flareAlphaTex->UploadHeap));
+		mTextures[flareAlphaTex->Name] = std::move(flareAlphaTex);
+	}
 }
 
 void CrateApp::BuildRootSignature()
+{
+	BuildDefaultRootSignature();
+	BuildFlareRootSignature();
+}
+
+void CrateApp::BuildDefaultRootSignature()
 {
 	CD3DX12_DESCRIPTOR_RANGE texTable;
 	texTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
@@ -614,38 +764,80 @@ void CrateApp::BuildRootSignature()
 	CD3DX12_DESCRIPTOR_RANGE samplerRange;
 	samplerRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, 1, 0);
 
-    // Root parameter can be a table, root descriptor or root constants.
-    CD3DX12_ROOT_PARAMETER slotRootParameter[5];
+	// Root parameter can be a table, root descriptor or root constants.
+	CD3DX12_ROOT_PARAMETER slotRootParameter[5];
 
 	// Perfomance TIP: Order from most frequent to least frequent.
 	slotRootParameter[0].InitAsDescriptorTable(1, &texTable, D3D12_SHADER_VISIBILITY_PIXEL);
-    slotRootParameter[1].InitAsConstantBufferView(0);
-    slotRootParameter[2].InitAsConstantBufferView(1);
-    slotRootParameter[3].InitAsConstantBufferView(2);
+	slotRootParameter[1].InitAsConstantBufferView(0);
+	slotRootParameter[2].InitAsConstantBufferView(1);
+	slotRootParameter[3].InitAsConstantBufferView(2);
 	slotRootParameter[4].InitAsDescriptorTable(1, &samplerRange, D3D12_SHADER_VISIBILITY_PIXEL);
 
-    // A root signature is an array of root parameters.
+	// A root signature is an array of root parameters.
 	CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(5, slotRootParameter,
 		0, nullptr,
 		D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
 
-    // create a root signature with a single slot which points to a descriptor range consisting of a single constant buffer
-    ComPtr<ID3DBlob> serializedRootSig = nullptr;
-    ComPtr<ID3DBlob> errorBlob = nullptr;
-    HRESULT hr = D3D12SerializeRootSignature(&rootSigDesc, D3D_ROOT_SIGNATURE_VERSION_1,
-        serializedRootSig.GetAddressOf(), errorBlob.GetAddressOf());
+	// create a root signature with a single slot which points to a descriptor range consisting of a single constant buffer
+	ComPtr<ID3DBlob> serializedRootSig = nullptr;
+	ComPtr<ID3DBlob> errorBlob = nullptr;
+	HRESULT hr = D3D12SerializeRootSignature(&rootSigDesc, D3D_ROOT_SIGNATURE_VERSION_1,
+		serializedRootSig.GetAddressOf(), errorBlob.GetAddressOf());
 
-    if(errorBlob != nullptr)
-    {
-        ::OutputDebugStringA((char*)errorBlob->GetBufferPointer());
-    }
-    ThrowIfFailed(hr);
+	if (errorBlob != nullptr)
+	{
+		::OutputDebugStringA((char*)errorBlob->GetBufferPointer());
+	}
+	ThrowIfFailed(hr);
 
-    ThrowIfFailed(md3dDevice->CreateRootSignature(
+	ThrowIfFailed(md3dDevice->CreateRootSignature(
 		0,
-        serializedRootSig->GetBufferPointer(),
-        serializedRootSig->GetBufferSize(),
-        IID_PPV_ARGS(mRootSignature.GetAddressOf())));
+		serializedRootSig->GetBufferPointer(),
+		serializedRootSig->GetBufferSize(),
+		IID_PPV_ARGS(mRootSignature.GetAddressOf())));
+}
+
+void CrateApp::BuildFlareRootSignature()
+{
+	CD3DX12_DESCRIPTOR_RANGE texTable;
+	texTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 2, 0);
+
+	CD3DX12_DESCRIPTOR_RANGE samplerRange;
+	samplerRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, 1, 0);
+
+	// Root parameter can be a table, root descriptor or root constants.
+	CD3DX12_ROOT_PARAMETER slotRootParameter[5];
+
+	// Perfomance TIP: Order from most frequent to least frequent.
+	slotRootParameter[0].InitAsDescriptorTable(1, &texTable, D3D12_SHADER_VISIBILITY_PIXEL);
+	slotRootParameter[1].InitAsConstantBufferView(0);
+	slotRootParameter[2].InitAsConstantBufferView(1);
+	slotRootParameter[3].InitAsConstantBufferView(2);
+	slotRootParameter[4].InitAsDescriptorTable(1, &samplerRange, D3D12_SHADER_VISIBILITY_PIXEL);
+
+	// A root signature is an array of root parameters.
+	CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(5, slotRootParameter,
+		0, nullptr,
+		D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+
+	// create a root signature with a single slot which points to a descriptor range consisting of a single constant buffer
+	ComPtr<ID3DBlob> serializedRootSig = nullptr;
+	ComPtr<ID3DBlob> errorBlob = nullptr;
+	HRESULT hr = D3D12SerializeRootSignature(&rootSigDesc, D3D_ROOT_SIGNATURE_VERSION_1,
+		serializedRootSig.GetAddressOf(), errorBlob.GetAddressOf());
+
+	if (errorBlob != nullptr)
+	{
+		::OutputDebugStringA((char*)errorBlob->GetBufferPointer());
+	}
+	ThrowIfFailed(hr);
+
+	ThrowIfFailed(md3dDevice->CreateRootSignature(
+		0,
+		serializedRootSig->GetBufferPointer(),
+		serializedRootSig->GetBufferSize(),
+		IID_PPV_ARGS(mFlareRootSignature.GetAddressOf())));
 }
 
 void CrateApp::BuildDescriptorHeaps()
@@ -654,7 +846,7 @@ void CrateApp::BuildDescriptorHeaps()
 	// Create the SRV heap.
 	//
 	D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc = {};
-	srvHeapDesc.NumDescriptors = 1;
+	srvHeapDesc.NumDescriptors = 3;
 	srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
 	srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
 	ThrowIfFailed(md3dDevice->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&mSrvDescriptorHeap)));
@@ -676,6 +868,20 @@ void CrateApp::BuildDescriptorHeaps()
 
 	md3dDevice->CreateShaderResourceView(woodCrateTex.Get(), &srvDesc, hDescriptor);
 
+	// flare
+	CD3DX12_CPU_DESCRIPTOR_HANDLE hDescriptorForFlare(mSrvDescriptorHeap->GetCPUDescriptorHandleForHeapStart(), 1, mCbvSrvUavDescriptorSize);
+	auto flareTexture = mTextures["flareTex"]->Resource;
+	srvDesc.Format = flareTexture->GetDesc().Format;
+	srvDesc.Texture2D.MipLevels = flareTexture->GetDesc().MipLevels;
+	md3dDevice->CreateShaderResourceView(flareTexture.Get(), &srvDesc, hDescriptorForFlare);
+
+	// flarealpha
+	CD3DX12_CPU_DESCRIPTOR_HANDLE hDescriptorForFlareAlpha(mSrvDescriptorHeap->GetCPUDescriptorHandleForHeapStart(), 2, mCbvSrvUavDescriptorSize);
+	auto flareAlphaTexture = mTextures["flareAlphaTex"]->Resource;
+	srvDesc.Format = flareAlphaTexture->GetDesc().Format;
+	srvDesc.Texture2D.MipLevels = flareAlphaTexture->GetDesc().MipLevels;
+	md3dDevice->CreateShaderResourceView(flareAlphaTexture.Get(), &srvDesc, hDescriptorForFlareAlpha);
+
 	// 创建采样器描述符堆
 	{
 		// create heap
@@ -695,12 +901,17 @@ void CrateApp::BuildShadersAndInputLayout()
 	mShaders["standardVS"] = d3dUtil::CompileShader(L"Shaders\\Default.hlsl", nullptr, "VS", "vs_5_0");
 	mShaders["opaquePS"] = d3dUtil::CompileShader(L"Shaders\\Default.hlsl", nullptr, "PS", "ps_5_0");
 	
+	mShaders["flareVS"] = d3dUtil::CompileShader(L"Shaders\\Flare.hlsl", nullptr, "VS", "vs_5_0");
+	mShaders["flarePS"] = d3dUtil::CompileShader(L"Shaders\\Flare.hlsl", nullptr, "PS", "ps_5_0");
+
     mInputLayout =
     {
         { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
         { "NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
 		{ "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
     };
+
+
 }
 
 void CrateApp::BuildShapeGeometry()
@@ -758,7 +969,7 @@ void CrateApp::BuildPSOs()
     D3D12_GRAPHICS_PIPELINE_STATE_DESC opaquePsoDesc;
 
 	//
-	// PSO for opaque objects.
+	// PSO for opaque box.
 	//
     ZeroMemory(&opaquePsoDesc, sizeof(D3D12_GRAPHICS_PIPELINE_STATE_DESC));
 	opaquePsoDesc.InputLayout = { mInputLayout.data(), (UINT)mInputLayout.size() };
@@ -785,10 +996,30 @@ void CrateApp::BuildPSOs()
 	opaquePsoDesc.DSVFormat = mDepthStencilFormat;
     ThrowIfFailed(md3dDevice->CreateGraphicsPipelineState(&opaquePsoDesc, IID_PPV_ARGS(&mOpaquePSO)));
 
-	// create wireframe pso
+	// pso for wireframe box
 	D3D12_GRAPHICS_PIPELINE_STATE_DESC wireFramePsoDesc = opaquePsoDesc;
 	wireFramePsoDesc.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;
 	ThrowIfFailed(md3dDevice->CreateGraphicsPipelineState(&wireFramePsoDesc, IID_PPV_ARGS(&mWireFramePSO)));
+
+	// pso for opaque flare box
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC opaqueFlarePsoDesc = opaquePsoDesc;
+	opaqueFlarePsoDesc.pRootSignature = mFlareRootSignature.Get();
+	opaqueFlarePsoDesc.VS =
+	{
+		reinterpret_cast<BYTE*>(mShaders["flareVS"]->GetBufferPointer()),
+		mShaders["flareVS"]->GetBufferSize()
+	};
+	opaqueFlarePsoDesc.PS =
+	{
+		reinterpret_cast<BYTE*>(mShaders["flarePS"]->GetBufferPointer()),
+		mShaders["flarePS"]->GetBufferSize()
+	};
+	ThrowIfFailed(md3dDevice->CreateGraphicsPipelineState(&opaqueFlarePsoDesc, IID_PPV_ARGS(&mOpaqueFlarePSO)));
+
+	// pso for wireframe flare box
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC opaqueWireframePsoDesc = opaqueFlarePsoDesc;
+	opaqueWireframePsoDesc.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;
+	ThrowIfFailed(md3dDevice->CreateGraphicsPipelineState(&opaqueWireframePsoDesc, IID_PPV_ARGS(&mWireFrameFlarePSO)));
 
 }
 
@@ -803,6 +1034,7 @@ void CrateApp::BuildFrameResources()
 
 void CrateApp::BuildMaterials()
 {
+	// box
 	auto woodCrate = std::make_unique<Material>();
 	woodCrate->Name = "woodCrate";
 	woodCrate->MatCBIndex = 0;
@@ -810,12 +1042,23 @@ void CrateApp::BuildMaterials()
 	woodCrate->DiffuseAlbedo = XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f);
 	woodCrate->FresnelR0 = XMFLOAT3(0.05f, 0.05f, 0.05f);
 	woodCrate->Roughness = 0.2f;
-
 	mMaterials["woodCrate"] = std::move(woodCrate);
+
+	// flare box
+	auto flareBox = std::make_unique<Material>();
+	flareBox->Name = "flareBox";
+	flareBox->MatCBIndex = 1;
+	flareBox->DiffuseSrvHeapIndex = 1;
+	flareBox->AlphaSrvHeapIndex = 2;
+	flareBox->DiffuseAlbedo = XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f);
+	flareBox->FresnelR0 = XMFLOAT3(0.05f, 0.05f, 0.05f);
+	flareBox->Roughness = 0.2f;
+	mMaterials["flareBox"] = std::move(flareBox);
 }
 
 void CrateApp::BuildRenderItems()
 {
+	// box
 	auto boxRitem = std::make_unique<RenderItem>();
 	boxRitem->ObjCBIndex = 0;
 	boxRitem->Mat = mMaterials["woodCrate"].get();
@@ -824,7 +1067,20 @@ void CrateApp::BuildRenderItems()
 	boxRitem->IndexCount = boxRitem->Geo->DrawArgs["box"].IndexCount;
 	boxRitem->StartIndexLocation = boxRitem->Geo->DrawArgs["box"].StartIndexLocation;
 	boxRitem->BaseVertexLocation = boxRitem->Geo->DrawArgs["box"].BaseVertexLocation;
+	XMStoreFloat4x4(&boxRitem->World, XMMatrixTranslation(-0.75f, 0, 0));
 	mAllRitems.push_back(std::move(boxRitem));
+
+	// flare box
+	auto flareBox = std::make_unique<RenderItem>();
+	flareBox->ObjCBIndex = 1;
+	flareBox->Mat = mMaterials["flareBox"].get();
+	flareBox->Geo = mGeometries["boxGeo"].get();
+	flareBox->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+	flareBox->IndexCount = flareBox->Geo->DrawArgs["box"].IndexCount;
+	flareBox->StartIndexLocation = flareBox->Geo->DrawArgs["box"].StartIndexLocation;
+	flareBox->BaseVertexLocation = flareBox->Geo->DrawArgs["box"].BaseVertexLocation;
+	XMStoreFloat4x4(&flareBox->World, XMMatrixTranslation(0.75f, 0, 0));
+	mAllRitems.push_back(std::move(flareBox));
 
 	// All the render items are opaque.
 	for(auto& e : mAllRitems)

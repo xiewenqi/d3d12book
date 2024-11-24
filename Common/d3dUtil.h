@@ -247,6 +247,9 @@ struct Material
 	// Index into SRV heap for diffuse texture.
 	int DiffuseSrvHeapIndex = -1;
 
+    // Index into SRV heap for apha texture.
+    int AlphaSrvHeapIndex = -1;
+
 	// Index into SRV heap for normal texture.
 	int NormalSrvHeapIndex = -1;
 
