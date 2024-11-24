@@ -69,6 +69,7 @@ private:
     virtual void OnMouseDown(WPARAM btnState, int x, int y)override;
     virtual void OnMouseUp(WPARAM btnState, int x, int y)override;
     virtual void OnMouseMove(WPARAM btnState, int x, int y)override;
+	virtual void OnKeyDown(WPARAM wParam, WPARAM lParam) override;
 
     void OnKeyboardInput(const GameTimer& gt);
 	void UpdateCamera(const GameTimer& gt);
@@ -76,6 +77,7 @@ private:
 	void UpdateObjectCBs(const GameTimer& gt);
 	void UpdateMaterialCBs(const GameTimer& gt);
 	void UpdateMainPassCB(const GameTimer& gt);
+	void UpdateSampler(const GameTimer& gt);
 
 	void LoadTextures();
     void BuildRootSignature();
@@ -91,6 +93,13 @@ private:
 	std::array<const CD3DX12_STATIC_SAMPLER_DESC, 6> GetStaticSamplers();
 
 private:
+	void ScaleTexTransform(float newDelta);
+	void ChangeSamplerFilter(D3D12_FILTER newFilter);
+	void ChangeSamplerAddressMode(D3D12_TEXTURE_ADDRESS_MODE newAddressMode);
+	void MarkSamplerDirty();
+	void CreateSamplerDescriptor();
+
+private:
 
     std::vector<std::unique_ptr<FrameResource>> mFrameResources;
     FrameResource* mCurrFrameResource = nullptr;
@@ -102,6 +111,8 @@ private:
 
 	ComPtr<ID3D12DescriptorHeap> mSrvDescriptorHeap = nullptr;
 
+	ComPtr<ID3D12DescriptorHeap> mSamplerDescriptorHeap = nullptr;
+
 	std::unordered_map<std::string, std::unique_ptr<MeshGeometry>> mGeometries;
 	std::unordered_map<std::string, std::unique_ptr<Material>> mMaterials;
 	std::unordered_map<std::string, std::unique_ptr<Texture>> mTextures;
@@ -110,6 +121,8 @@ private:
     std::vector<D3D12_INPUT_ELEMENT_DESC> mInputLayout;
 
     ComPtr<ID3D12PipelineState> mOpaquePSO = nullptr;
+	ComPtr<ID3D12PipelineState> mWireFramePSO = nullptr;
+	bool mOpaqueDraw = true;
  
 	// List of all the render items.
 	std::vector<std::unique_ptr<RenderItem>> mAllRitems;
@@ -128,6 +141,13 @@ private:
 	float mRadius = 2.5f;
 
     POINT mLastMousePos;
+
+	float mTexTransformScale = 1.0f;
+	const float mTexTransformScaleDelta = 0.01f;
+
+	D3D12_FILTER mCurrentSamplerFilter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+	D3D12_TEXTURE_ADDRESS_MODE mCurrentSamplerAddressMode = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+	bool mSamplerDirty = false;
 };
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance,
@@ -230,6 +250,7 @@ void CrateApp::Update(const GameTimer& gt)
 	UpdateObjectCBs(gt);
 	UpdateMaterialCBs(gt);
 	UpdateMainPassCB(gt);
+	UpdateSampler(gt);
 }
 
 void CrateApp::Draw(const GameTimer& gt)
@@ -242,7 +263,8 @@ void CrateApp::Draw(const GameTimer& gt)
 
     // A command list can be reset after it has been added to the command queue via ExecuteCommandList.
     // Reusing the command list reuses memory.
-    ThrowIfFailed(mCommandList->Reset(cmdListAlloc.Get(), mOpaquePSO.Get()));
+	ComPtr<ID3D12PipelineState> currentPSO = mOpaqueDraw ? mOpaquePSO : mWireFramePSO;
+    ThrowIfFailed(mCommandList->Reset(cmdListAlloc.Get(), currentPSO.Get()));
 
     mCommandList->RSSetViewports(1, &mScreenViewport);
     mCommandList->RSSetScissorRects(1, &mScissorRect);
@@ -258,13 +280,16 @@ void CrateApp::Draw(const GameTimer& gt)
     // Specify the buffers we are going to render to.
     mCommandList->OMSetRenderTargets(1, &CurrentBackBufferView(), true, &DepthStencilView());
 
-	ID3D12DescriptorHeap* descriptorHeaps[] = { mSrvDescriptorHeap.Get() };
+	ID3D12DescriptorHeap* descriptorHeaps[] = { mSrvDescriptorHeap.Get(), mSamplerDescriptorHeap.Get() };
 	mCommandList->SetDescriptorHeaps(_countof(descriptorHeaps), descriptorHeaps);
 
 	mCommandList->SetGraphicsRootSignature(mRootSignature.Get());
 
 	auto passCB = mCurrFrameResource->PassCB->Resource();
 	mCommandList->SetGraphicsRootConstantBufferView(2, passCB->GetGPUVirtualAddress());
+
+	// 我们的例子中，采样器是全局的
+	mCommandList->SetGraphicsRootDescriptorTable(4, mSamplerDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
 
     DrawRenderItems(mCommandList.Get(), mOpaqueRitems);
 
@@ -330,15 +355,128 @@ void CrateApp::OnMouseMove(WPARAM btnState, int x, int y)
         mRadius += dx - dy;
 
         // Restrict the radius.
-        mRadius = MathHelper::Clamp(mRadius, 5.0f, 150.0f);
+        mRadius = MathHelper::Clamp(mRadius, 2.5f, 150.0f);
     }
 
     mLastMousePos.x = x;
     mLastMousePos.y = y;
 }
- 
+
+void CrateApp::OnKeyDown(WPARAM wParam, WPARAM lParam)
+{	
+	switch (wParam)
+	{
+		// 放大UV
+	case '1': 
+		ScaleTexTransform(this->mTexTransformScaleDelta);
+		break;
+
+		// 缩小UV
+	case '2': 
+		ScaleTexTransform(-this->mTexTransformScaleDelta);
+		break;
+		
+		// POINT过滤
+	case '3':
+		ChangeSamplerFilter(D3D12_FILTER_MIN_MAG_MIP_POINT);
+		break;
+		
+		// LINEAR过滤
+	case '4':
+		ChangeSamplerFilter(D3D12_FILTER_MIN_MAG_MIP_LINEAR);
+		break;
+		
+		// 各向异性过滤
+	case '5':
+		ChangeSamplerFilter(D3D12_FILTER_ANISOTROPIC);
+		break;
+		
+		// WRAP寻址
+	case '6':
+		ChangeSamplerAddressMode(D3D12_TEXTURE_ADDRESS_MODE_WRAP);
+		break;
+		
+		// CLAMP寻址
+	case '7':
+		ChangeSamplerAddressMode(D3D12_TEXTURE_ADDRESS_MODE_CLAMP);
+		break;
+		
+		// BORDER寻址
+	case '8':
+		ChangeSamplerAddressMode(D3D12_TEXTURE_ADDRESS_MODE_BORDER);
+		break;
+		
+		// MIRROR寻址
+	case '9':
+		ChangeSamplerAddressMode(D3D12_TEXTURE_ADDRESS_MODE_MIRROR);
+		break;
+
+	case VK_F1:
+		mOpaqueDraw = true;
+		break;
+
+	case VK_F2:
+		mOpaqueDraw = false;
+		break;
+
+	}
+}
+
+void CrateApp::ScaleTexTransform(float newScaleDelta)
+{
+	mTexTransformScale = max(mTexTransformScale + newScaleDelta, 0.1f);
+	for (auto& e : mAllRitems)
+	{
+		XMMATRIX newScaleMatrix = XMMatrixScaling(mTexTransformScale, mTexTransformScale, 1);
+		XMStoreFloat4x4(&e->TexTransform, newScaleMatrix);
+		e->NumFramesDirty = gNumFrameResources;
+	}
+}
+
+void CrateApp::ChangeSamplerFilter(D3D12_FILTER newFilter)
+{
+	if (newFilter != mCurrentSamplerFilter)
+	{
+		mCurrentSamplerFilter = newFilter;
+		MarkSamplerDirty();
+	}
+}
+
+void CrateApp::ChangeSamplerAddressMode(D3D12_TEXTURE_ADDRESS_MODE newAddressMode)
+{
+	if (newAddressMode != mCurrentSamplerAddressMode)
+	{
+		mCurrentSamplerAddressMode = newAddressMode;
+		MarkSamplerDirty();
+	}
+}
+
+void CrateApp::MarkSamplerDirty()
+{
+	mSamplerDirty = true;
+}
+
+void CrateApp::CreateSamplerDescriptor()
+{
+	XMFLOAT4 color = {1.0f, 1.0f, 0.0f, 1.0f};
+
+	D3D12_SAMPLER_DESC samplerDesc;
+	samplerDesc.Filter = mCurrentSamplerFilter;
+	samplerDesc.AddressU = mCurrentSamplerAddressMode;
+	samplerDesc.AddressV = mCurrentSamplerAddressMode;
+	samplerDesc.AddressW = mCurrentSamplerAddressMode;
+	samplerDesc.MipLODBias = 0;
+	samplerDesc.MaxAnisotropy = 16;
+	samplerDesc.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+	memcpy(samplerDesc.BorderColor, & color, sizeof(samplerDesc.BorderColor));
+	samplerDesc.MinLOD = 0;
+	samplerDesc.MaxLOD = D3D12_FLOAT32_MAX;
+	md3dDevice->CreateSampler(&samplerDesc, mSamplerDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
+}
+
 void CrateApp::OnKeyboardInput(const GameTimer& gt)
 {
+	
 }
  
 void CrateApp::UpdateCamera(const GameTimer& gt)
@@ -447,11 +585,20 @@ void CrateApp::UpdateMainPassCB(const GameTimer& gt)
 	currPassCB->CopyData(0, mMainPassCB);
 }
 
+void CrateApp::UpdateSampler(const GameTimer& gt)
+{
+	if (mSamplerDirty)
+	{
+		CreateSamplerDescriptor();
+		mSamplerDirty = false;
+	}
+}
+
 void CrateApp::LoadTextures()
 {
 	auto woodCrateTex = std::make_unique<Texture>();
 	woodCrateTex->Name = "woodCrateTex";
-	woodCrateTex->Filename = L"../../Textures/WoodCrate01.dds";
+	woodCrateTex->Filename = L"../../Textures/mipmaps.dds";
 	ThrowIfFailed(DirectX::CreateDDSTextureFromFile12(md3dDevice.Get(),
 		mCommandList.Get(), woodCrateTex->Filename.c_str(),
 		woodCrateTex->Resource, woodCrateTex->UploadHeap));
@@ -464,20 +611,22 @@ void CrateApp::BuildRootSignature()
 	CD3DX12_DESCRIPTOR_RANGE texTable;
 	texTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
 
+	CD3DX12_DESCRIPTOR_RANGE samplerRange;
+	samplerRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, 1, 0);
+
     // Root parameter can be a table, root descriptor or root constants.
-    CD3DX12_ROOT_PARAMETER slotRootParameter[4];
+    CD3DX12_ROOT_PARAMETER slotRootParameter[5];
 
 	// Perfomance TIP: Order from most frequent to least frequent.
 	slotRootParameter[0].InitAsDescriptorTable(1, &texTable, D3D12_SHADER_VISIBILITY_PIXEL);
     slotRootParameter[1].InitAsConstantBufferView(0);
     slotRootParameter[2].InitAsConstantBufferView(1);
     slotRootParameter[3].InitAsConstantBufferView(2);
-
-	auto staticSamplers = GetStaticSamplers();
+	slotRootParameter[4].InitAsDescriptorTable(1, &samplerRange, D3D12_SHADER_VISIBILITY_PIXEL);
 
     // A root signature is an array of root parameters.
-	CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(4, slotRootParameter,
-		(UINT)staticSamplers.size(), staticSamplers.data(),
+	CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(5, slotRootParameter,
+		0, nullptr,
 		D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
 
     // create a root signature with a single slot which points to a descriptor range consisting of a single constant buffer
@@ -526,6 +675,19 @@ void CrateApp::BuildDescriptorHeaps()
 	srvDesc.Texture2D.ResourceMinLODClamp = 0.0f;
 
 	md3dDevice->CreateShaderResourceView(woodCrateTex.Get(), &srvDesc, hDescriptor);
+
+	// 创建采样器描述符堆
+	{
+		// create heap
+		D3D12_DESCRIPTOR_HEAP_DESC samplerHeapDesc = {};
+		samplerHeapDesc.NumDescriptors = 1;
+		samplerHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
+		samplerHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+		ThrowIfFailed(md3dDevice->CreateDescriptorHeap(&samplerHeapDesc, IID_PPV_ARGS(&mSamplerDescriptorHeap)));
+
+		// create sampler
+		CreateSamplerDescriptor();
+	}
 }
 
 void CrateApp::BuildShadersAndInputLayout()
@@ -622,6 +784,12 @@ void CrateApp::BuildPSOs()
 	opaquePsoDesc.SampleDesc.Quality = m4xMsaaState ? (m4xMsaaQuality - 1) : 0;
 	opaquePsoDesc.DSVFormat = mDepthStencilFormat;
     ThrowIfFailed(md3dDevice->CreateGraphicsPipelineState(&opaquePsoDesc, IID_PPV_ARGS(&mOpaquePSO)));
+
+	// create wireframe pso
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC wireFramePsoDesc = opaquePsoDesc;
+	wireFramePsoDesc.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;
+	ThrowIfFailed(md3dDevice->CreateGraphicsPipelineState(&wireFramePsoDesc, IID_PPV_ARGS(&mWireFramePSO)));
+
 }
 
 void CrateApp::BuildFrameResources()

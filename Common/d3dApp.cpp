@@ -365,10 +365,15 @@ LRESULT D3DApp::MsgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         {
             PostQuitMessage(0);
         }
-        else if((int)wParam == VK_F2)
-            Set4xMsaaState(!m4xMsaaState);
+		else
+		{
+			OnKeyUp(wParam, lParam);
+		}
 
         return 0;
+	case WM_KEYDOWN:
+		OnKeyDown(wParam, lParam);
+		return 0;
 	}
 
 	return DefWindowProc(hwnd, msg, wParam, lParam);

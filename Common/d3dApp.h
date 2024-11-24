@@ -52,6 +52,8 @@ protected:
 	virtual void OnMouseDown(WPARAM btnState, int x, int y){ }
 	virtual void OnMouseUp(WPARAM btnState, int x, int y)  { }
 	virtual void OnMouseMove(WPARAM btnState, int x, int y){ }
+    virtual void OnKeyUp(WPARAM wParam, WPARAM lParam) {};
+    virtual void OnKeyDown(WPARAM wParam, WPARAM lParam) {};
 
 protected:
 
