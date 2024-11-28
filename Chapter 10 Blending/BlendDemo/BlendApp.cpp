@@ -78,6 +78,7 @@ private:
     virtual void OnMouseDown(WPARAM btnState, int x, int y)override;
     virtual void OnMouseUp(WPARAM btnState, int x, int y)override;
     virtual void OnMouseMove(WPARAM btnState, int x, int y)override;
+	virtual void OnKeyDown(WPARAM wParam, LPARAM lParam) override;
 
     void OnKeyboardInput(const GameTimer& gt);
 	void UpdateCamera(const GameTimer& gt);
@@ -146,6 +147,8 @@ private:
     float mRadius = 50.0f;
 
     POINT mLastMousePos;
+
+	bool mDrawTransparentFirst = false;
 };
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance,
@@ -264,7 +267,7 @@ void BlendApp::Draw(const GameTimer& gt)
 
     // A command list can be reset after it has been added to the command queue via ExecuteCommandList.
     // Reusing the command list reuses memory.
-    ThrowIfFailed(mCommandList->Reset(cmdListAlloc.Get(), mPSOs["opaque"].Get()));
+    ThrowIfFailed(mCommandList->Reset(cmdListAlloc.Get(), nullptr));
 
     mCommandList->RSSetViewports(1, &mScreenViewport);
     mCommandList->RSSetScissorRects(1, &mScissorRect);
@@ -288,13 +291,23 @@ void BlendApp::Draw(const GameTimer& gt)
 	auto passCB = mCurrFrameResource->PassCB->Resource();
 	mCommandList->SetGraphicsRootConstantBufferView(2, passCB->GetGPUVirtualAddress());
 
-    DrawRenderItems(mCommandList.Get(), mRitemLayer[(int)RenderLayer::Opaque]);
+	if (mDrawTransparentFirst)
+	{
+		mCommandList->SetPipelineState(mPSOs["transparent"].Get());
+		DrawRenderItems(mCommandList.Get(), mRitemLayer[(int)RenderLayer::Transparent]);
+	}
+
+	mCommandList->SetPipelineState(mPSOs["opaque"].Get());
+	DrawRenderItems(mCommandList.Get(), mRitemLayer[(int)RenderLayer::Opaque]);
 
 	mCommandList->SetPipelineState(mPSOs["alphaTested"].Get());
 	DrawRenderItems(mCommandList.Get(), mRitemLayer[(int)RenderLayer::AlphaTested]);
 
-	mCommandList->SetPipelineState(mPSOs["transparent"].Get());
-	DrawRenderItems(mCommandList.Get(), mRitemLayer[(int)RenderLayer::Transparent]);
+	if (!mDrawTransparentFirst)
+	{
+		mCommandList->SetPipelineState(mPSOs["transparent"].Get());
+		DrawRenderItems(mCommandList.Get(), mRitemLayer[(int)RenderLayer::Transparent]);
+	}
 
     // Indicate a state transition on the resource usage.
 	mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(CurrentBackBuffer(),
@@ -364,6 +377,14 @@ void BlendApp::OnMouseMove(WPARAM btnState, int x, int y)
 
     mLastMousePos.x = x;
     mLastMousePos.y = y;
+}
+
+void BlendApp::OnKeyDown(WPARAM wParam, LPARAM lParam)
+{
+	if (wParam == '1')
+	{
+		mDrawTransparentFirst = !mDrawTransparentFirst;
+	}
 }
  
 void BlendApp::OnKeyboardInput(const GameTimer& gt)
