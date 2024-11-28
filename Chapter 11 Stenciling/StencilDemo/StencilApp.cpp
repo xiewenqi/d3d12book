@@ -61,6 +61,14 @@ enum class RenderLayer : int
 	Count
 };
 
+enum  FeatureFlag : UINT64
+{
+	SkipSetMirrorStencil = 0x00000001,
+	SkipStencilForShadow = 0x00000002,
+	MirroredSkullUsingDefaultCullMode = 0x00000004,
+
+};
+
 class StencilApp : public D3DApp
 {
 public:
@@ -79,6 +87,7 @@ private:
     virtual void OnMouseDown(WPARAM btnState, int x, int y)override;
     virtual void OnMouseUp(WPARAM btnState, int x, int y)override;
     virtual void OnMouseMove(WPARAM btnState, int x, int y)override;
+	virtual void OnKeyDown(WPARAM wParam, LPARAM lParam) override;
 
     void OnKeyboardInput(const GameTimer& gt);
 	void UpdateCamera(const GameTimer& gt);
@@ -101,6 +110,8 @@ private:
     void DrawRenderItems(ID3D12GraphicsCommandList* cmdList, const std::vector<RenderItem*>& ritems);
 
 	std::array<const CD3DX12_STATIC_SAMPLER_DESC, 6> GetStaticSamplers();
+
+	void ToggleFeatureFlag(FeatureFlag flag);
 
 private:
 
@@ -147,6 +158,8 @@ private:
     float mRadius = 12.0f;
 
     POINT mLastMousePos;
+
+	UINT64 mFeatureFlag = 0;
 };
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance,
@@ -290,15 +303,26 @@ void StencilApp::Draw(const GameTimer& gt)
 	mCommandList->SetGraphicsRootConstantBufferView(2, passCB->GetGPUVirtualAddress());
     DrawRenderItems(mCommandList.Get(), mRitemLayer[(int)RenderLayer::Opaque]);
 	
-	// Mark the visible mirror pixels in the stencil buffer with the value 1
-	mCommandList->OMSetStencilRef(1);
-	mCommandList->SetPipelineState(mPSOs["markStencilMirrors"].Get());
-	DrawRenderItems(mCommandList.Get(), mRitemLayer[(int)RenderLayer::Mirrors]);
+	if (!(mFeatureFlag & FeatureFlag::SkipSetMirrorStencil))
+	{
+		// Mark the visible mirror pixels in the stencil buffer with the value 1
+		mCommandList->OMSetStencilRef(1);
+		mCommandList->SetPipelineState(mPSOs["markStencilMirrors"].Get());
+		DrawRenderItems(mCommandList.Get(), mRitemLayer[(int)RenderLayer::Mirrors]);
+	}
 
 	// Draw the reflection into the mirror only (only for pixels where the stencil buffer is 1).
 	// Note that we must supply a different per-pass constant buffer--one with the lights reflected.
 	mCommandList->SetGraphicsRootConstantBufferView(2, passCB->GetGPUVirtualAddress() + 1 * passCBByteSize);
-	mCommandList->SetPipelineState(mPSOs["drawStencilReflections"].Get());
+	if (mFeatureFlag & FeatureFlag::MirroredSkullUsingDefaultCullMode)
+	{
+		mCommandList->SetPipelineState(mPSOs["drawStencilReflections2"].Get());
+	}
+	else
+	{
+		mCommandList->SetPipelineState(mPSOs["drawStencilReflections"].Get());
+	}
+	
 	DrawRenderItems(mCommandList.Get(), mRitemLayer[(int)RenderLayer::Reflected]);
 
 	// Restore main pass constants and stencil ref.
@@ -310,7 +334,15 @@ void StencilApp::Draw(const GameTimer& gt)
 	DrawRenderItems(mCommandList.Get(), mRitemLayer[(int)RenderLayer::Transparent]);
 
 	// Draw shadows
-	mCommandList->SetPipelineState(mPSOs["shadow"].Get());
+	if (mFeatureFlag & FeatureFlag::SkipStencilForShadow)
+	{
+		mCommandList->SetPipelineState(mPSOs["transparent"].Get());
+	}
+	else
+	{
+		mCommandList->SetPipelineState(mPSOs["shadow"].Get());
+	}
+	
 	DrawRenderItems(mCommandList.Get(), mRitemLayer[(int)RenderLayer::Shadow]);
 	
     // Indicate a state transition on the resource usage.
@@ -379,7 +411,36 @@ void StencilApp::OnMouseMove(WPARAM btnState, int x, int y)
     mLastMousePos.x = x;
     mLastMousePos.y = y;
 }
- 
+
+void StencilApp::OnKeyDown(WPARAM wParam, LPARAM lParam)
+{
+	// 1- 控制是否跳过绘制镜面stencil值的过程
+	if (wParam == '1')
+	{
+		ToggleFeatureFlag(FeatureFlag::SkipSetMirrorStencil);
+	}
+	else if (wParam == '2')
+	{
+		ToggleFeatureFlag(FeatureFlag::SkipStencilForShadow);
+	}
+	else if (wParam == '3')
+	{
+		ToggleFeatureFlag(FeatureFlag::MirroredSkullUsingDefaultCullMode);
+	}
+}
+
+void StencilApp::ToggleFeatureFlag(FeatureFlag flag)
+{
+	if ((mFeatureFlag & flag) == 0)
+	{
+		mFeatureFlag |= flag;
+	}
+	else
+	{
+		mFeatureFlag &= ~flag;
+	}
+}
+
 void StencilApp::OnKeyboardInput(const GameTimer& gt)
 {
 	//
@@ -538,13 +599,18 @@ void StencilApp::UpdateReflectedPassCB(const GameTimer& gt)
 {
 	mReflectedPassCB = mMainPassCB;
 
+	// 用vector表示plane，(n_x, n_y, n_z, d)，镜面法线指向z正方向，且平面位于原点
 	XMVECTOR mirrorPlane = XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f); // xy plane
+	
+	// 该平面的反射矩阵
 	XMMATRIX R = XMMatrixReflect(mirrorPlane);
 
 	// Reflect the lighting.
 	for(int i = 0; i < 3; ++i)
 	{
 		XMVECTOR lightDir = XMLoadFloat3(&mMainPassCB.Lights[i].Direction);
+
+		// XMVector3TransformNormal并不是用来做“法向量/Normal”的处理，它只是忽略r[3]而不进行translate，DX这个命令有点搞怪
 		XMVECTOR reflectedLightDir = XMVector3TransformNormal(lightDir, R);
 		XMStoreFloat3(&mReflectedPassCB.Lights[i].Direction, reflectedLightDir);
 	}
@@ -954,6 +1020,7 @@ void StencilApp::BuildPSOs()
 	//
 
 	CD3DX12_BLEND_DESC mirrorBlendState(D3D12_DEFAULT);
+	// todo xiewneqi: 禁止写颜色缓冲区，但是这时候blendEnabled = false啊？
 	mirrorBlendState.RenderTarget[0].RenderTargetWriteMask = 0;
 
 	D3D12_DEPTH_STENCIL_DESC mirrorDSS;
@@ -964,13 +1031,13 @@ void StencilApp::BuildPSOs()
 	mirrorDSS.StencilReadMask = 0xff;
 	mirrorDSS.StencilWriteMask = 0xff;
 	
-	mirrorDSS.FrontFace.StencilFailOp = D3D12_STENCIL_OP_KEEP;
-	mirrorDSS.FrontFace.StencilDepthFailOp = D3D12_STENCIL_OP_KEEP;
-	mirrorDSS.FrontFace.StencilPassOp = D3D12_STENCIL_OP_REPLACE;
-	mirrorDSS.FrontFace.StencilFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+	mirrorDSS.FrontFace.StencilFailOp = D3D12_STENCIL_OP_KEEP; // 模板检测失败：保留缓冲区值
+	mirrorDSS.FrontFace.StencilDepthFailOp = D3D12_STENCIL_OP_KEEP;  // 模板检测成功但深度检测失败：保留缓冲区值
+	mirrorDSS.FrontFace.StencilPassOp = D3D12_STENCIL_OP_REPLACE; // 模板检测通过：替换缓冲区值为stencil参考值
+	mirrorDSS.FrontFace.StencilFunc = D3D12_COMPARISON_FUNC_ALWAYS; // 总是通过
 
 	// We are not rendering backfacing polygons, so these settings do not matter.
-	mirrorDSS.BackFace.StencilFailOp = D3D12_STENCIL_OP_KEEP;
+	mirrorDSS.BackFace.StencilFailOp = D3D12_STENCIL_OP_KEEP;  
 	mirrorDSS.BackFace.StencilDepthFailOp = D3D12_STENCIL_OP_KEEP;
 	mirrorDSS.BackFace.StencilPassOp = D3D12_STENCIL_OP_REPLACE;
 	mirrorDSS.BackFace.StencilFunc = D3D12_COMPARISON_FUNC_ALWAYS;
@@ -1008,6 +1075,13 @@ void StencilApp::BuildPSOs()
 	drawReflectionsPsoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
 	drawReflectionsPsoDesc.RasterizerState.FrontCounterClockwise = true;
 	ThrowIfFailed(md3dDevice->CreateGraphicsPipelineState(&drawReflectionsPsoDesc, IID_PPV_ARGS(&mPSOs["drawStencilReflections"])));
+
+	//
+	// PSO for stencil reflections, but using default cull mode 
+	//
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC drawReflectionsPsoDesc2 = drawReflectionsPsoDesc;
+	drawReflectionsPsoDesc2.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+	ThrowIfFailed(md3dDevice->CreateGraphicsPipelineState(&drawReflectionsPsoDesc2, IID_PPV_ARGS(&mPSOs["drawStencilReflections2"])));
 
 	//
 	// PSO for shadow objects
