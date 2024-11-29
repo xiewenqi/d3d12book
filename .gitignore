@@ -30,6 +30,7 @@ $RECYCLE.BIN/
 *.idb
 /**/x64/Debug/**
 /**/x64/Release/**
+*.vcxproj.user
 
 # =========================
 # Operating System Files
