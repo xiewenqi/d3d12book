@@ -379,7 +379,7 @@ GeometryGenerator::MeshData GeometryGenerator::CreateGeosphere(float radius, uin
     return meshData;
 }
 
-GeometryGenerator::MeshData GeometryGenerator::CreateCylinder(float bottomRadius, float topRadius, float height, uint32 sliceCount, uint32 stackCount)
+GeometryGenerator::MeshData GeometryGenerator::CreateCylinder(float bottomRadius, float topRadius, float height, uint32 sliceCount, uint32 stackCount, bool needTopCap/* = true*/, bool needBottomCap/* = true*/)
 {
     MeshData meshData;
 
@@ -467,9 +467,15 @@ GeometryGenerator::MeshData GeometryGenerator::CreateCylinder(float bottomRadius
 		}
 	}
 
-	BuildCylinderTopCap(bottomRadius, topRadius, height, sliceCount, stackCount, meshData);
-	BuildCylinderBottomCap(bottomRadius, topRadius, height, sliceCount, stackCount, meshData);
+	if (needTopCap)
+	{
+		BuildCylinderTopCap(bottomRadius, topRadius, height, sliceCount, stackCount, meshData);
+	}
 
+	if (needBottomCap)
+	{
+		BuildCylinderBottomCap(bottomRadius, topRadius, height, sliceCount, stackCount, meshData);
+	}
     return meshData;
 }
 

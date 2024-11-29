@@ -56,6 +56,7 @@ enum class RenderLayer : int
 {
 	Opaque = 0,
 	Transparent,
+	AnimatedBolt,
 	AlphaTested,
 	Count
 };
@@ -86,7 +87,7 @@ private:
 	void UpdateObjectCBs(const GameTimer& gt);
 	void UpdateMaterialCBs(const GameTimer& gt);
 	void UpdateMainPassCB(const GameTimer& gt);
-	void UpdateWaves(const GameTimer& gt); 
+	void UpdateWaves(const GameTimer& gt);
 
 	void LoadTextures();
     void BuildRootSignature();
@@ -95,6 +96,7 @@ private:
     void BuildLandGeometry();
     void BuildWavesGeometry();
 	void BuildBoxGeometry();
+	void BuildBoltGeometry();
     void BuildPSOs();
     void BuildFrameResources();
     void BuildMaterials();
@@ -121,10 +123,13 @@ private:
 	std::unordered_map<std::string, std::unique_ptr<MeshGeometry>> mGeometries;
 	std::unordered_map<std::string, std::unique_ptr<Material>> mMaterials;
 	std::unordered_map<std::string, std::unique_ptr<Texture>> mTextures;
+	std::vector<std::unique_ptr<Texture>> mBoltAnimTextures;
 	std::unordered_map<std::string, ComPtr<ID3DBlob>> mShaders;
 	std::unordered_map<std::string, ComPtr<ID3D12PipelineState>> mPSOs;
 
     std::vector<D3D12_INPUT_ELEMENT_DESC> mInputLayout;
+
+	UINT mBoltAnimSrvOffsetInHeap = 0;
  
     RenderItem* mWavesRitem = nullptr;
 
@@ -206,6 +211,7 @@ bool BlendApp::Initialize()
     BuildLandGeometry();
     BuildWavesGeometry();
 	BuildBoxGeometry();
+	BuildBoltGeometry();
 	BuildMaterials();
     BuildRenderItems();
     BuildFrameResources();
@@ -295,6 +301,9 @@ void BlendApp::Draw(const GameTimer& gt)
 	{
 		mCommandList->SetPipelineState(mPSOs["transparent"].Get());
 		DrawRenderItems(mCommandList.Get(), mRitemLayer[(int)RenderLayer::Transparent]);
+
+		mCommandList->SetPipelineState(mPSOs["animatedBolt"].Get());
+		DrawRenderItems(mCommandList.Get(), mRitemLayer[(int)RenderLayer::AnimatedBolt]);
 	}
 
 	mCommandList->SetPipelineState(mPSOs["opaque"].Get());
@@ -307,6 +316,9 @@ void BlendApp::Draw(const GameTimer& gt)
 	{
 		mCommandList->SetPipelineState(mPSOs["transparent"].Get());
 		DrawRenderItems(mCommandList.Get(), mRitemLayer[(int)RenderLayer::Transparent]);
+
+		mCommandList->SetPipelineState(mPSOs["animatedBolt"].Get());
+		DrawRenderItems(mCommandList.Get(), mRitemLayer[(int)RenderLayer::AnimatedBolt]);
 	}
 
     // Indicate a state transition on the resource usage.
@@ -409,26 +421,52 @@ void BlendApp::UpdateCamera(const GameTimer& gt)
 
 void BlendApp::AnimateMaterials(const GameTimer& gt)
 {
-	// Scroll the water material texture coordinates.
-	auto waterMat = mMaterials["water"].get();
+	// 水的动画
+	{
+		// Scroll the water material texture coordinates.
+		auto waterMat = mMaterials["water"].get();
 
-	float& tu = waterMat->MatTransform(3, 0);
-	float& tv = waterMat->MatTransform(3, 1);
+		float& tu = waterMat->MatTransform(3, 0);
+		float& tv = waterMat->MatTransform(3, 1);
 
-	tu += 0.1f * gt.DeltaTime();
-	tv += 0.02f * gt.DeltaTime();
+		tu += 0.1f * gt.DeltaTime();
+		tv += 0.02f * gt.DeltaTime();
 
-	if(tu >= 1.0f)
-		tu -= 1.0f;
+		if (tu >= 1.0f)
+			tu -= 1.0f;
 
-	if(tv >= 1.0f)
-		tv -= 1.0f;
+		if (tv >= 1.0f)
+			tv -= 1.0f;
 
-	waterMat->MatTransform(3, 0) = tu;
-	waterMat->MatTransform(3, 1) = tv;
+		waterMat->MatTransform(3, 0) = tu;
+		waterMat->MatTransform(3, 1) = tv;
 
-	// Material has changed, so need to update cbuffer.
-	waterMat->NumFramesDirty = gNumFrameResources;
+		// Material has changed, so need to update cbuffer.
+		waterMat->NumFramesDirty = gNumFrameResources;
+	}
+
+	// bolt动画，更换贴图时，只需要指定heap中的偏移，在绘制时会使用该偏移量找到具体的描述符并绑定到贴图寄存器中
+	{
+		static float lastUpdatedTime = gt.TotalTime();
+		const float updateInterval = 1 / 30.0f;
+		// 固定以30fps来发
+		
+		float currentTime = gt.TotalTime();
+		if (currentTime - lastUpdatedTime >= updateInterval)
+		{
+			auto boltAnimMat = mMaterials["boltAnim"].get();
+			UINT currentOffset = mBoltAnimSrvOffsetInHeap;
+			// 3是动画序列在堆中的起始偏移
+			mBoltAnimSrvOffsetInHeap = (currentOffset - 3 + 1) % mBoltAnimTextures.size() + 3;
+
+			std::wstring ws = L"BoltAnimation, set mBoltAnimSrvOffsetInHeap to " + std::to_wstring(mBoltAnimSrvOffsetInHeap) + std::wstring(L"\n");
+			OutputDebugString(ws.c_str());
+
+			boltAnimMat->DiffuseSrvHeapIndex = mBoltAnimSrvOffsetInHeap;
+			lastUpdatedTime = currentTime;
+		}
+	}
+
 }
 
 void BlendApp::UpdateObjectCBs(const GameTimer& gt)
@@ -582,6 +620,23 @@ void BlendApp::LoadTextures()
 	mTextures[grassTex->Name] = std::move(grassTex);
 	mTextures[waterTex->Name] = std::move(waterTex);
 	mTextures[fenceTex->Name] = std::move(fenceTex);
+
+	// bolt动画贴图
+	const int AnimTexturesCount = 60, fileNameBufferCount = 100;
+	wchar_t fileNameBuffer[fileNameBufferCount];
+	for (int i = 1; i <= AnimTexturesCount; ++i)
+	{
+		memset(fileNameBuffer, 0, sizeof(fileNameBuffer));
+		swprintf(fileNameBuffer, fileNameBufferCount, L"../../Textures/BoltAnim_DDS/Bolt%.3d.dds", i);
+		
+		auto animTexture = std::make_unique<Texture>();
+		animTexture->Name = std::string("BoltAnim_") + std::to_string(i);
+		animTexture->Filename = fileNameBuffer;
+		ThrowIfFailed(DirectX::CreateDDSTextureFromFile12(md3dDevice.Get(), 
+			mCommandList.Get(), animTexture->Filename.c_str(),
+			animTexture->Resource, animTexture->UploadHeap));
+		mBoltAnimTextures.push_back(std::move(animTexture));
+	}
 }
 
 void BlendApp::BuildRootSignature()
@@ -630,7 +685,7 @@ void BlendApp::BuildDescriptorHeaps()
 	// Create the SRV heap.
 	//
 	D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc = {};
-	srvHeapDesc.NumDescriptors = 3;
+	srvHeapDesc.NumDescriptors = 3 + (UINT)mBoltAnimTextures.size();
 	srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
 	srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
 	ThrowIfFailed(md3dDevice->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&mSrvDescriptorHeap)));
@@ -663,6 +718,17 @@ void BlendApp::BuildDescriptorHeaps()
 
 	srvDesc.Format = fenceTex->GetDesc().Format;
 	md3dDevice->CreateShaderResourceView(fenceTex.Get(), &srvDesc, hDescriptor);
+
+	// bolt动画贴图
+	mBoltAnimSrvOffsetInHeap = 3;
+	for (int i = 0; i < mBoltAnimTextures.size(); ++ i)
+	{
+		const Texture* pAnimatedTexture = mBoltAnimTextures[i].get();
+
+		hDescriptor.Offset(1, mCbvSrvDescriptorSize);
+		srvDesc.Format = pAnimatedTexture->Resource.Get()->GetDesc().Format;
+		md3dDevice->CreateShaderResourceView(pAnimatedTexture->Resource.Get(), &srvDesc, hDescriptor);
+	}
 }
 
 void BlendApp::BuildShadersAndInputLayout()
@@ -680,9 +746,18 @@ void BlendApp::BuildShadersAndInputLayout()
 		NULL, NULL
 	};
 
+	// 使用了顶点雾后，用additive blend的物体，未着色的地方也会加入雾效，这些像素需要被clip掉
+	const D3D_SHADER_MACRO additiveBlendingWithFogDefines[] = 
+	{
+		"FOG", "1",
+		"ADDITIVE_BLENDING_WITH_FOG", "1",
+		NULL, NULL
+	};
+
 	mShaders["standardVS"] = d3dUtil::CompileShader(L"Shaders\\Default.hlsl", nullptr, "VS", "vs_5_0");
 	mShaders["opaquePS"] = d3dUtil::CompileShader(L"Shaders\\Default.hlsl", defines, "PS", "ps_5_0");
 	mShaders["alphaTestedPS"] = d3dUtil::CompileShader(L"Shaders\\Default.hlsl", alphaTestDefines, "PS", "ps_5_0");
+	mShaders["animatedBoltPS"] = d3dUtil::CompileShader(L"Shaders\\Default.hlsl", additiveBlendingWithFogDefines, "PS", "ps_5_0");
 	
     mInputLayout =
     {
@@ -853,6 +928,47 @@ void BlendApp::BuildBoxGeometry()
 	mGeometries["boxGeo"] = std::move(geo);
 }
 
+void BlendApp::BuildBoltGeometry()
+{
+	GeometryGenerator geoGen;
+	GeometryGenerator::MeshData cylinderMeshData = geoGen.CreateCylinder(2, 2, 10.0f, 20, 10, false, false);
+	
+	auto geo = std::make_unique<MeshGeometry>();
+	geo->Name = "boltGeo";
+
+	// 如果这里使用cylinderMeshData中的Vertices，画出来的顶点是乱的，因为两个Vertex定义不同，艹
+	std::vector<Vertex> vertices(cylinderMeshData.Vertices.size());
+	for (size_t i = 0; i < cylinderMeshData.Vertices.size(); ++i)
+	{
+		auto& p = cylinderMeshData.Vertices[i].Position;
+		vertices[i].Pos = p;
+		vertices[i].Normal = cylinderMeshData.Vertices[i].Normal;
+		vertices[i].TexC = cylinderMeshData.Vertices[i].TexC;
+	}
+
+	const UINT vbByteSize = (UINT)vertices.size() * sizeof(Vertex);
+	geo->VertexBufferGPU = d3dUtil::CreateDefaultBuffer(md3dDevice.Get(),
+		mCommandList.Get(), vertices.data(), vbByteSize, geo->VertexBufferUploader);
+
+	std::vector<std::uint16_t> indices = cylinderMeshData.GetIndices16();
+	const UINT ibByteSize = (UINT)indices.size() * sizeof(std::uint16_t);
+	geo->IndexBufferGPU = d3dUtil::CreateDefaultBuffer(md3dDevice.Get(), 
+		mCommandList.Get(), indices.data(), ibByteSize, geo->IndexBufferUploader);
+
+	geo->VertexByteStride = sizeof(Vertex);
+	geo->VertexBufferByteSize = vbByteSize;
+	geo->IndexFormat = DXGI_FORMAT_R16_UINT;
+	geo->IndexBufferByteSize = ibByteSize;
+
+	SubmeshGeometry submesh;
+	submesh.IndexCount = (UINT)indices.size();
+	submesh.StartIndexLocation = 0;
+	submesh.BaseVertexLocation = 0;
+
+	geo->DrawArgs["bolt"] = submesh;
+	mGeometries[geo->Name] = std::move(geo);
+}	
+
 void BlendApp::BuildPSOs()
 {
     D3D12_GRAPHICS_PIPELINE_STATE_DESC opaquePsoDesc;
@@ -918,6 +1034,28 @@ void BlendApp::BuildPSOs()
 	};
 	alphaTestedPsoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
 	ThrowIfFailed(md3dDevice->CreateGraphicsPipelineState(&alphaTestedPsoDesc, IID_PPV_ARGS(&mPSOs["alphaTested"])));
+
+	// PSO for additive-blending animated-bolt
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC animatedBoltPsoDesc = opaquePsoDesc;
+	animatedBoltPsoDesc.PS =
+	{
+		reinterpret_cast<BYTE*>(mShaders["animatedBoltPS"]->GetBufferPointer()),
+		mShaders["animatedBoltPS"]->GetBufferSize()
+	};
+	animatedBoltPsoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+
+	D3D12_RENDER_TARGET_BLEND_DESC animatedBoltBlendDesc = transparencyBlendDesc;
+	animatedBoltBlendDesc.SrcBlend = D3D12_BLEND_ONE;
+	animatedBoltBlendDesc.DestBlend = D3D12_BLEND_ONE;
+	animatedBoltBlendDesc.BlendOp = D3D12_BLEND_OP_ADD;
+	animatedBoltBlendDesc.SrcBlendAlpha = D3D12_BLEND_ZERO;
+	animatedBoltBlendDesc.DestBlendAlpha = D3D12_BLEND_ONE;
+	animatedBoltBlendDesc.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+	animatedBoltBlendDesc.LogicOp = D3D12_LOGIC_OP_NOOP;
+	animatedBoltBlendDesc.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+
+	animatedBoltPsoDesc.BlendState.RenderTarget[0] = animatedBoltBlendDesc;
+	ThrowIfFailed(md3dDevice->CreateGraphicsPipelineState(&animatedBoltPsoDesc, IID_PPV_ARGS(&mPSOs["animatedBolt"])));
 }
 
 void BlendApp::BuildFrameResources()
@@ -957,9 +1095,19 @@ void BlendApp::BuildMaterials()
 	wirefence->FresnelR0 = XMFLOAT3(0.1f, 0.1f, 0.1f);
 	wirefence->Roughness = 0.25f;
 
+	// bolt动画材质
+	auto boltAnimMaterial = std::make_unique<Material>();
+	boltAnimMaterial->Name = "boltAnim";
+	boltAnimMaterial->MatCBIndex = 3;
+	boltAnimMaterial->DiffuseSrvHeapIndex = mBoltAnimSrvOffsetInHeap;
+	boltAnimMaterial->DiffuseAlbedo = XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f);
+	boltAnimMaterial->FresnelR0 = XMFLOAT3(0.1f, 0.1f, 0.1f);
+	boltAnimMaterial->Roughness = 0.0f;
+
 	mMaterials["grass"] = std::move(grass);
 	mMaterials["water"] = std::move(water);
 	mMaterials["wirefence"] = std::move(wirefence);
+	mMaterials["boltAnim"] = std::move(boltAnimMaterial);
 }
 
 void BlendApp::BuildRenderItems()
@@ -1004,9 +1152,23 @@ void BlendApp::BuildRenderItems()
 
 	mRitemLayer[(int)RenderLayer::AlphaTested].push_back(boxRitem.get());
 
+	auto animatedBoltItem = std::make_unique<RenderItem>();
+	XMStoreFloat4x4(&animatedBoltItem->World, XMMatrixTranslation(3.0f, 11.0f, -9.0f));
+	XMStoreFloat4x4(&animatedBoltItem->TexTransform, XMMatrixScaling(1.0f, 4.0f, 1.0f));
+	animatedBoltItem->ObjCBIndex = 3;
+	animatedBoltItem->Mat = mMaterials["boltAnim"].get();
+	animatedBoltItem->Geo = mGeometries["boltGeo"].get();
+	animatedBoltItem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+	animatedBoltItem->IndexCount = animatedBoltItem->Geo->DrawArgs["bolt"].IndexCount;
+	animatedBoltItem->StartIndexLocation = animatedBoltItem->Geo->DrawArgs["bolt"].StartIndexLocation;
+	animatedBoltItem->BaseVertexLocation = animatedBoltItem->Geo->DrawArgs["bolt"].BaseVertexLocation;
+
+	mRitemLayer[(int)RenderLayer::AnimatedBolt].push_back(animatedBoltItem.get());
+
     mAllRitems.push_back(std::move(wavesRitem));
     mAllRitems.push_back(std::move(gridRitem));
 	mAllRitems.push_back(std::move(boxRitem));
+	mAllRitems.push_back(std::move(animatedBoltItem));
 }
 
 void BlendApp::DrawRenderItems(ID3D12GraphicsCommandList* cmdList, const std::vector<RenderItem*>& ritems)
@@ -1073,7 +1235,7 @@ std::array<const CD3DX12_STATIC_SAMPLER_DESC, 6> BlendApp::GetStaticSamplers()
 		D3D12_TEXTURE_ADDRESS_MODE_CLAMP,  // addressV
 		D3D12_TEXTURE_ADDRESS_MODE_CLAMP); // addressW
 
-	const CD3DX12_STATIC_SAMPLER_DESC anisotropicWrap(
+	CD3DX12_STATIC_SAMPLER_DESC anisotropicWrap(
 		4, // shaderRegister
 		D3D12_FILTER_ANISOTROPIC, // filter
 		D3D12_TEXTURE_ADDRESS_MODE_WRAP,  // addressU

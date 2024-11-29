@@ -69,7 +69,7 @@ private:
     virtual void OnMouseDown(WPARAM btnState, int x, int y)override;
     virtual void OnMouseUp(WPARAM btnState, int x, int y)override;
     virtual void OnMouseMove(WPARAM btnState, int x, int y)override;
-	virtual void OnKeyDown(WPARAM wParam, WPARAM lParam) override;
+	virtual void OnKeyDown(WPARAM wParam, LPARAM lParam) override;
 
     void OnKeyboardInput(const GameTimer& gt);
 	void UpdateCamera(const GameTimer& gt);
@@ -471,7 +471,7 @@ void CrateApp::OnMouseMove(WPARAM btnState, int x, int y)
     mLastMousePos.y = y;
 }
 
-void CrateApp::OnKeyDown(WPARAM wParam, WPARAM lParam)
+void CrateApp::OnKeyDown(WPARAM wParam, LPARAM lParam)
 {	
 	switch (wParam)
 	{
@@ -720,7 +720,8 @@ void CrateApp::LoadTextures()
 	{
 		auto woodCrateTex = std::make_unique<Texture>();
 		woodCrateTex->Name = "woodCrateTex";
-		woodCrateTex->Filename = L"../../Textures/mipmaps.dds";
+		// woodCrateTex->Filename = L"../../Textures/mipmaps.dds";
+		woodCrateTex->Filename = L"../../Textures/woodCrate01.dds";
 		ThrowIfFailed(DirectX::CreateDDSTextureFromFile12(md3dDevice.Get(),
 			mCommandList.Get(), woodCrateTex->Filename.c_str(),
 			woodCrateTex->Resource, woodCrateTex->UploadHeap));

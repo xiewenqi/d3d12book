@@ -124,6 +124,10 @@ float4 PS(VertexOut pin) : SV_Target
 	// shader early, thereby skipping the rest of the shader code.
 	clip(diffuseAlbedo.a - 0.1f);
 #endif
+    
+#ifdef ADDITIVE_BLENDING_WITH_FOG
+    clip(diffuseAlbedo.rgb - 0.1f);
+#endif
 
     // Interpolating normal can unnormalize it, so renormalize it.
     pin.NormalW = normalize(pin.NormalW);
