@@ -61,6 +61,36 @@ enum class RenderLayer : int
 	Count
 };
 
+enum class RenderMode : int
+{
+	Normal = 0,
+	PixelOverdraw,
+	Count,
+};
+
+// 用来显示overdraw的资源，包括depth/stencil贴图、quad、其它等
+struct PixelOverdrawResources
+{
+public:
+	// 全屏quad
+	std::unique_ptr<MeshGeometry> quadGeo;
+
+	// 全屏quad所用的PSO
+	Microsoft::WRL::ComPtr<ID3D12PipelineState> quadPSO;
+
+	// 渲染场景所用的PSO，不写color buffer，只写stencil
+	std::unordered_map<std::string, ComPtr<ID3D12PipelineState>> mPixelOverdrawPSOs;
+
+	// 承接depth/stencil buffer内容的纹理
+	ComPtr<ID3D12Resource> quadTexture;
+
+	// quadTexture在heap中的索引
+	UINT srvOffsetInHeap;
+
+	// 渲染quad的renderItem
+	std::unique_ptr<RenderItem> renderItem;
+};
+
 class BlendApp : public D3DApp
 {
 public:
@@ -108,6 +138,16 @@ private:
     float GetHillsHeight(float x, float z)const;
     XMFLOAT3 GetHillsNormal(float x, float z)const;
 
+	void CreateResourcesForPixelOverdrawMode();
+
+	void ChangeRenderMode(RenderMode newMode);
+
+	D3D12_CPU_DESCRIPTOR_HANDLE GetDepthStencilViewForCurrentRenderMode();
+
+	void BuildPSOsForSceneRendering(RenderMode targetRenderMode, std::unordered_map<std::string, ComPtr<ID3D12PipelineState>>& targetPsoMap);
+
+	ComPtr<ID3D12PipelineState> GetPsoForSceneRendering(const std::string& psoName);
+
 private:
 
     std::vector<std::unique_ptr<FrameResource>> mFrameResources;
@@ -125,7 +165,8 @@ private:
 	std::unordered_map<std::string, std::unique_ptr<Texture>> mTextures;
 	std::vector<std::unique_ptr<Texture>> mBoltAnimTextures;
 	std::unordered_map<std::string, ComPtr<ID3DBlob>> mShaders;
-	std::unordered_map<std::string, ComPtr<ID3D12PipelineState>> mPSOs;
+
+	std::unordered_map<std::string, ComPtr<ID3D12PipelineState>> mDefaultPSOs;
 
     std::vector<D3D12_INPUT_ELEMENT_DESC> mInputLayout;
 
@@ -154,6 +195,9 @@ private:
     POINT mLastMousePos;
 
 	bool mDrawTransparentFirst = false;
+
+	RenderMode mRenderMode = RenderMode::Normal;
+	std::unique_ptr<PixelOverdrawResources> mPixelOverdrawResources;
 };
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance,
@@ -284,11 +328,12 @@ void BlendApp::Draw(const GameTimer& gt)
 
     // Clear the back buffer and depth buffer.
     mCommandList->ClearRenderTargetView(CurrentBackBufferView(), (float*)&mMainPassCB.FogColor, 0, nullptr);
-    mCommandList->ClearDepthStencilView(DepthStencilView(), D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, nullptr);
+	mCommandList->ClearDepthStencilView(GetDepthStencilViewForCurrentRenderMode(), D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, nullptr);
 
     // Specify the buffers we are going to render to.
-    mCommandList->OMSetRenderTargets(1, &CurrentBackBufferView(), true, &DepthStencilView());
+    mCommandList->OMSetRenderTargets(1, &CurrentBackBufferView(), true, &GetDepthStencilViewForCurrentRenderMode());
 
+	// 所有renderMode的shader resource view都位于同样的堆上
 	ID3D12DescriptorHeap* descriptorHeaps[] = { mSrvDescriptorHeap.Get() };
 	mCommandList->SetDescriptorHeaps(_countof(descriptorHeaps), descriptorHeaps);
 
@@ -297,28 +342,87 @@ void BlendApp::Draw(const GameTimer& gt)
 	auto passCB = mCurrFrameResource->PassCB->Resource();
 	mCommandList->SetGraphicsRootConstantBufferView(2, passCB->GetGPUVirtualAddress());
 
+	if (mRenderMode == RenderMode::PixelOverdraw)
+	{
+		CreateResourcesForPixelOverdrawMode();
+	}
+
+	// 渲染场景用的pso根据不同的renderMode有所不同
 	if (mDrawTransparentFirst)
 	{
-		mCommandList->SetPipelineState(mPSOs["transparent"].Get());
+		mCommandList->SetPipelineState(GetPsoForSceneRendering("transparent").Get());
 		DrawRenderItems(mCommandList.Get(), mRitemLayer[(int)RenderLayer::Transparent]);
 
-		mCommandList->SetPipelineState(mPSOs["animatedBolt"].Get());
+		mCommandList->SetPipelineState(GetPsoForSceneRendering("animatedBolt").Get());
 		DrawRenderItems(mCommandList.Get(), mRitemLayer[(int)RenderLayer::AnimatedBolt]);
 	}
 
-	mCommandList->SetPipelineState(mPSOs["opaque"].Get());
+	mCommandList->SetPipelineState(GetPsoForSceneRendering("opaque").Get());
 	DrawRenderItems(mCommandList.Get(), mRitemLayer[(int)RenderLayer::Opaque]);
 
-	mCommandList->SetPipelineState(mPSOs["alphaTested"].Get());
+	mCommandList->SetPipelineState(GetPsoForSceneRendering("alphaTested").Get());
 	DrawRenderItems(mCommandList.Get(), mRitemLayer[(int)RenderLayer::AlphaTested]);
 
 	if (!mDrawTransparentFirst)
 	{
-		mCommandList->SetPipelineState(mPSOs["transparent"].Get());
+		mCommandList->SetPipelineState(GetPsoForSceneRendering("transparent").Get());
 		DrawRenderItems(mCommandList.Get(), mRitemLayer[(int)RenderLayer::Transparent]);
 
-		mCommandList->SetPipelineState(mPSOs["animatedBolt"].Get());
+		mCommandList->SetPipelineState(GetPsoForSceneRendering("animatedBolt").Get());
 		DrawRenderItems(mCommandList.Get(), mRitemLayer[(int)RenderLayer::AnimatedBolt]);
+	}
+
+	// 到这里正常绘制就结束了，如果是pixeloverdraw，需要再画一个quad
+	if (mRenderMode == RenderMode::PixelOverdraw)
+	{
+		// stencilbuffer到texture中
+		{
+			// 首先把深度/模板缓冲区 状态从 D3D12_RESOURCE_STATE_DEPTH_WRITE 转为 D3D12_RESOURCE_STATE_COPY_SOURCE
+			mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(mDepthStencilBuffer.Get(),
+				D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_COPY_SOURCE));
+
+			// 再把quadTexture 状态从 D3D12_RESOURCE_STATE_COMMON（创建时指定）转到 D3D12_RESOURCE_STATE_COPY_DEST
+			mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(mPixelOverdrawResources->quadTexture.Get(),
+				D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST));
+
+			// 将深度/模板缓冲区复制到 quadTexture 中
+			// mCommandList->CopyResource(mPixelOverdrawResources->quadTexture.Get(), mDepthStencilBuffer.Get());
+			D3D12_TEXTURE_COPY_LOCATION sourceLocation;
+			sourceLocation.pResource = mDepthStencilBuffer.Get();
+			sourceLocation.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+			sourceLocation.SubresourceIndex = 1;
+
+			D3D12_TEXTURE_COPY_LOCATION destLocation;
+			destLocation.pResource = mPixelOverdrawResources->quadTexture.Get();
+			destLocation.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+			destLocation.SubresourceIndex = 0;
+			mCommandList->CopyTextureRegion(&destLocation, 0, 0, 0, &sourceLocation, nullptr);
+
+			// 恢复深度/模板缓冲区的状态
+			mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(mDepthStencilBuffer.Get(),
+				D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE));
+
+			// 恢复quadTexture的状态
+			mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(mPixelOverdrawResources->quadTexture.Get(),
+				D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+		}
+
+		// 绑定pixelOverdraw专用的PSO
+		mCommandList->SetPipelineState(mPixelOverdrawResources->quadPSO.Get());
+
+		// 将texture绑定到t(0)中
+		
+
+		// 绘制
+		mCommandList->IASetVertexBuffers(0, 1, &mPixelOverdrawResources->quadGeo->VertexBufferView());
+		mCommandList->IASetIndexBuffer(&mPixelOverdrawResources->quadGeo->IndexBufferView());
+		mCommandList->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+		CD3DX12_GPU_DESCRIPTOR_HANDLE hDescriptor(mSrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart(), mPixelOverdrawResources->srvOffsetInHeap, mCbvSrvDescriptorSize);
+		mCommandList->SetGraphicsRootDescriptorTable(0, hDescriptor);
+
+		SubmeshGeometry& subMesh = mPixelOverdrawResources->quadGeo->DrawArgs["quad"];
+		mCommandList->DrawIndexedInstanced(subMesh.IndexCount, 1, subMesh.StartIndexLocation, subMesh.BaseVertexLocation, 0);
 	}
 
     // Indicate a state transition on the resource usage.
@@ -397,6 +501,14 @@ void BlendApp::OnKeyDown(WPARAM wParam, LPARAM lParam)
 	{
 		mDrawTransparentFirst = !mDrawTransparentFirst;
 	}
+	else if (wParam == VK_F1)
+	{
+		ChangeRenderMode(RenderMode::Normal);
+	}
+	else if (wParam == VK_F2)
+	{
+		ChangeRenderMode(RenderMode::PixelOverdraw);
+	}
 }
  
 void BlendApp::OnKeyboardInput(const GameTimer& gt)
@@ -460,7 +572,7 @@ void BlendApp::AnimateMaterials(const GameTimer& gt)
 			mBoltAnimSrvOffsetInHeap = (currentOffset - 3 + 1) % mBoltAnimTextures.size() + 3;
 
 			std::wstring ws = L"BoltAnimation, set mBoltAnimSrvOffsetInHeap to " + std::to_wstring(mBoltAnimSrvOffsetInHeap) + std::wstring(L"\n");
-			OutputDebugString(ws.c_str());
+			// OutputDebugString(ws.c_str());
 
 			boltAnimMat->DiffuseSrvHeapIndex = mBoltAnimSrvOffsetInHeap;
 			lastUpdatedTime = currentTime;
@@ -685,7 +797,9 @@ void BlendApp::BuildDescriptorHeaps()
 	// Create the SRV heap.
 	//
 	D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc = {};
-	srvHeapDesc.NumDescriptors = 3 + (UINT)mBoltAnimTextures.size();
+	srvHeapDesc.NumDescriptors = 3  // grass+water+fence
+		+ (UINT)mBoltAnimTextures.size()  // bolt animation sequence
+		+ 1; // pixeloverdraw texture
 	srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
 	srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
 	ThrowIfFailed(md3dDevice->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&mSrvDescriptorHeap)));
@@ -758,6 +872,10 @@ void BlendApp::BuildShadersAndInputLayout()
 	mShaders["opaquePS"] = d3dUtil::CompileShader(L"Shaders\\Default.hlsl", defines, "PS", "ps_5_0");
 	mShaders["alphaTestedPS"] = d3dUtil::CompileShader(L"Shaders\\Default.hlsl", alphaTestDefines, "PS", "ps_5_0");
 	mShaders["animatedBoltPS"] = d3dUtil::CompileShader(L"Shaders\\Default.hlsl", additiveBlendingWithFogDefines, "PS", "ps_5_0");
+
+	// 绘制quad的VS和PS
+	mShaders["fullScreenQuadVS"] = d3dUtil::CompileShader(L"Shaders\\Default.hlsl",  nullptr, "VS_FullScreenQuad", "vs_5_0");
+	mShaders["pixelOverdrawPS"] = d3dUtil::CompileShader(L"Shaders\\Default.hlsl",  nullptr, "PS_PixelOverdraw", "ps_5_0");
 	
     mInputLayout =
     {
@@ -971,91 +1089,7 @@ void BlendApp::BuildBoltGeometry()
 
 void BlendApp::BuildPSOs()
 {
-    D3D12_GRAPHICS_PIPELINE_STATE_DESC opaquePsoDesc;
-
-	//
-	// PSO for opaque objects.
-	//
-    ZeroMemory(&opaquePsoDesc, sizeof(D3D12_GRAPHICS_PIPELINE_STATE_DESC));
-	opaquePsoDesc.InputLayout = { mInputLayout.data(), (UINT)mInputLayout.size() };
-	opaquePsoDesc.pRootSignature = mRootSignature.Get();
-	opaquePsoDesc.VS = 
-	{ 
-		reinterpret_cast<BYTE*>(mShaders["standardVS"]->GetBufferPointer()), 
-		mShaders["standardVS"]->GetBufferSize()
-	};
-	opaquePsoDesc.PS = 
-	{ 
-		reinterpret_cast<BYTE*>(mShaders["opaquePS"]->GetBufferPointer()),
-		mShaders["opaquePS"]->GetBufferSize()
-	};
-	opaquePsoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
-	opaquePsoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
-	opaquePsoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
-	opaquePsoDesc.SampleMask = UINT_MAX;
-	opaquePsoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-	opaquePsoDesc.NumRenderTargets = 1;
-	opaquePsoDesc.RTVFormats[0] = mBackBufferFormat;
-	opaquePsoDesc.SampleDesc.Count = m4xMsaaState ? 4 : 1;
-	opaquePsoDesc.SampleDesc.Quality = m4xMsaaState ? (m4xMsaaQuality - 1) : 0;
-	opaquePsoDesc.DSVFormat = mDepthStencilFormat;
-    ThrowIfFailed(md3dDevice->CreateGraphicsPipelineState(&opaquePsoDesc, IID_PPV_ARGS(&mPSOs["opaque"])));
-
-	//
-	// PSO for transparent objects
-	//
-
-	D3D12_GRAPHICS_PIPELINE_STATE_DESC transparentPsoDesc = opaquePsoDesc;
-
-	D3D12_RENDER_TARGET_BLEND_DESC transparencyBlendDesc;
-	transparencyBlendDesc.BlendEnable = true;
-	transparencyBlendDesc.LogicOpEnable = false;
-	transparencyBlendDesc.SrcBlend = D3D12_BLEND_SRC_ALPHA;
-	transparencyBlendDesc.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
-	transparencyBlendDesc.BlendOp = D3D12_BLEND_OP_ADD;
-	transparencyBlendDesc.SrcBlendAlpha = D3D12_BLEND_ONE;
-	transparencyBlendDesc.DestBlendAlpha = D3D12_BLEND_ZERO;
-	transparencyBlendDesc.BlendOpAlpha = D3D12_BLEND_OP_ADD;
-	transparencyBlendDesc.LogicOp = D3D12_LOGIC_OP_NOOP;
-	transparencyBlendDesc.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-
-	transparentPsoDesc.BlendState.RenderTarget[0] = transparencyBlendDesc;
-	ThrowIfFailed(md3dDevice->CreateGraphicsPipelineState(&transparentPsoDesc, IID_PPV_ARGS(&mPSOs["transparent"])));
-
-	//
-	// PSO for alpha tested objects
-	//
-
-	D3D12_GRAPHICS_PIPELINE_STATE_DESC alphaTestedPsoDesc = opaquePsoDesc;
-	alphaTestedPsoDesc.PS = 
-	{ 
-		reinterpret_cast<BYTE*>(mShaders["alphaTestedPS"]->GetBufferPointer()),
-		mShaders["alphaTestedPS"]->GetBufferSize()
-	};
-	alphaTestedPsoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-	ThrowIfFailed(md3dDevice->CreateGraphicsPipelineState(&alphaTestedPsoDesc, IID_PPV_ARGS(&mPSOs["alphaTested"])));
-
-	// PSO for additive-blending animated-bolt
-	D3D12_GRAPHICS_PIPELINE_STATE_DESC animatedBoltPsoDesc = opaquePsoDesc;
-	animatedBoltPsoDesc.PS =
-	{
-		reinterpret_cast<BYTE*>(mShaders["animatedBoltPS"]->GetBufferPointer()),
-		mShaders["animatedBoltPS"]->GetBufferSize()
-	};
-	animatedBoltPsoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-
-	D3D12_RENDER_TARGET_BLEND_DESC animatedBoltBlendDesc = transparencyBlendDesc;
-	animatedBoltBlendDesc.SrcBlend = D3D12_BLEND_ONE;
-	animatedBoltBlendDesc.DestBlend = D3D12_BLEND_ONE;
-	animatedBoltBlendDesc.BlendOp = D3D12_BLEND_OP_ADD;
-	animatedBoltBlendDesc.SrcBlendAlpha = D3D12_BLEND_ZERO;
-	animatedBoltBlendDesc.DestBlendAlpha = D3D12_BLEND_ONE;
-	animatedBoltBlendDesc.BlendOpAlpha = D3D12_BLEND_OP_ADD;
-	animatedBoltBlendDesc.LogicOp = D3D12_LOGIC_OP_NOOP;
-	animatedBoltBlendDesc.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-
-	animatedBoltPsoDesc.BlendState.RenderTarget[0] = animatedBoltBlendDesc;
-	ThrowIfFailed(md3dDevice->CreateGraphicsPipelineState(&animatedBoltPsoDesc, IID_PPV_ARGS(&mPSOs["animatedBolt"])));
+	BuildPSOsForSceneRendering(RenderMode::Normal, mDefaultPSOs);
 }
 
 void BlendApp::BuildFrameResources()
@@ -1276,4 +1310,265 @@ XMFLOAT3 BlendApp::GetHillsNormal(float x, float z)const
     XMStoreFloat3(&n, unitNormal);
 
     return n;
+}
+
+void BlendApp::CreateResourcesForPixelOverdrawMode()
+{
+	if (mPixelOverdrawResources.get() != nullptr) return;
+
+	mPixelOverdrawResources = std::make_unique<PixelOverdrawResources>();
+
+	// quad geometry
+	{
+		GeometryGenerator geoGen;
+		GeometryGenerator::MeshData quadMesh = geoGen.CreateQuad(-1, 1, 2, 2, 0);
+
+		// quad vertex
+		std::vector<Vertex> vertices(quadMesh.Vertices.size());
+		for (size_t i = 0; i < quadMesh.Vertices.size(); ++i)
+		{
+			vertices[i].Pos = quadMesh.Vertices[i].Position;
+			vertices[i].TexC = quadMesh.Vertices[i].TexC;
+		}
+
+		const UINT vbByteSize = (UINT)vertices.size() * sizeof(Vertex);
+
+		std::vector<std::uint16_t> indices = quadMesh.GetIndices16();
+		const UINT ibByteSize = (UINT)indices.size() * sizeof(std::uint16_t);
+
+		auto geo = std::make_unique<MeshGeometry>();
+		geo->Name = "quadGeo";
+
+		geo->VertexBufferGPU = d3dUtil::CreateDefaultBuffer(md3dDevice.Get(), mCommandList.Get(), vertices.data(), vbByteSize, geo->VertexBufferUploader);
+		geo->IndexBufferGPU = d3dUtil::CreateDefaultBuffer(md3dDevice.Get(), mCommandList.Get(), indices.data(), ibByteSize, geo->IndexBufferUploader);
+
+		geo->VertexByteStride = sizeof(Vertex);
+		geo->VertexBufferByteSize = vbByteSize;
+		geo->IndexFormat = DXGI_FORMAT_R16_UINT;
+		geo->IndexBufferByteSize = ibByteSize;
+
+		SubmeshGeometry submesh;
+		submesh.IndexCount = (UINT)indices.size();
+		submesh.StartIndexLocation = 0;
+		submesh.BaseVertexLocation = 0;
+		geo->DrawArgs["quad"] = submesh;
+
+		mPixelOverdrawResources->quadGeo = std::move(geo);
+	}
+
+	// 渲染场景物体时的pso
+	BuildPSOsForSceneRendering(RenderMode::PixelOverdraw, mPixelOverdrawResources->mPixelOverdrawPSOs);
+	
+	// pso for render quad
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC quadPsoDesc;
+	ZeroMemory(&quadPsoDesc, sizeof(D3D12_GRAPHICS_PIPELINE_STATE_DESC));
+	quadPsoDesc.InputLayout = { mInputLayout.data(), (UINT)mInputLayout.size() };
+	quadPsoDesc.pRootSignature = mRootSignature.Get();
+	quadPsoDesc.VS = 
+	{ 
+		reinterpret_cast<BYTE*>(mShaders["fullScreenQuadVS"]->GetBufferPointer()),
+		mShaders["fullScreenQuadVS"]->GetBufferSize() 
+	};
+	quadPsoDesc.PS = 
+	{
+		reinterpret_cast<BYTE*>(mShaders["pixelOverdrawPS"]->GetBufferPointer()),
+		mShaders["pixelOverdrawPS"]->GetBufferSize()
+	};
+	quadPsoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+	quadPsoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+	quadPsoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+	// 深度检测一直通过
+	quadPsoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+	quadPsoDesc.SampleMask = UINT_MAX;
+	quadPsoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+	quadPsoDesc.NumRenderTargets = 1;
+	quadPsoDesc.RTVFormats[0] = mBackBufferFormat;
+	quadPsoDesc.SampleDesc.Count = m4xMsaaState ? 4 : 1;
+	quadPsoDesc.SampleDesc.Quality = m4xMsaaState ? (m4xMsaaQuality - 1) : 0;
+	quadPsoDesc.DSVFormat = mDepthStencilFormat;
+	ThrowIfFailed(md3dDevice->CreateGraphicsPipelineState(&quadPsoDesc, IID_PPV_ARGS(mPixelOverdrawResources->quadPSO.GetAddressOf())));
+
+	// 纹理
+	D3D12_RESOURCE_DESC texDesc;
+	ZeroMemory(&texDesc, sizeof(D3D12_RESOURCE_DESC));
+	texDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+	texDesc.Alignment = 0;
+	texDesc.Width = mClientWidth;
+	texDesc.Height = mClientHeight;
+	texDesc.DepthOrArraySize = 1;
+	texDesc.MipLevels = 1;
+	
+	texDesc.Format = DXGI_FORMAT_R8_UINT;
+	
+	texDesc.SampleDesc.Count = 1;
+	texDesc.SampleDesc.Quality = 0;
+	texDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+	texDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+	
+	ThrowIfFailed(md3dDevice->CreateCommittedResource(
+		&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
+		D3D12_HEAP_FLAG_NONE,
+		&texDesc,
+		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+		nullptr,
+		IID_PPV_ARGS(mPixelOverdrawResources->quadTexture.GetAddressOf())));
+
+	// 为纹理创建描述符
+	mPixelOverdrawResources->srvOffsetInHeap = 3 + mBoltAnimTextures.size();
+	CD3DX12_CPU_DESCRIPTOR_HANDLE hDescriptor(mSrvDescriptorHeap->GetCPUDescriptorHandleForHeapStart(), mPixelOverdrawResources->srvOffsetInHeap, mCbvSrvDescriptorSize);
+	D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+	srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+	
+	// srvDesc.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS; // todo xiewneqi:
+	srvDesc.Format = DXGI_FORMAT_R8_UINT;
+	
+	srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+	srvDesc.Texture2D.MostDetailedMip = 0;
+	srvDesc.Texture2D.MipLevels = 1;
+	srvDesc.Texture2D.PlaneSlice = 0;
+	md3dDevice->CreateShaderResourceView(mPixelOverdrawResources->quadTexture.Get(), &srvDesc, hDescriptor);
+}
+
+void BlendApp::ChangeRenderMode(RenderMode newMode)
+{
+	if (newMode == mRenderMode) return;
+
+	mRenderMode = newMode;
+}
+
+D3D12_CPU_DESCRIPTOR_HANDLE BlendApp::GetDepthStencilViewForCurrentRenderMode()
+{
+	// 查看D3DApp中depth stencil的创建，也是用一张普通纹理，没有必要额外申请
+	return DepthStencilView();
+}
+
+void BlendApp::BuildPSOsForSceneRendering(RenderMode targetRenderMode, std::unordered_map<std::string, ComPtr<ID3D12PipelineState>>& targetPsoMap)
+{
+
+	auto ChangePSOForRenderMode = [targetRenderMode](D3D12_GRAPHICS_PIPELINE_STATE_DESC& psoDesc) -> void {
+		if (targetRenderMode == RenderMode::PixelOverdraw)
+		{
+			// 禁止写入颜色缓冲区
+			psoDesc.BlendState.RenderTarget[0].RenderTargetWriteMask = 0;
+
+			// 开启stencil，且stencilFunc为always，op为inc_sat
+			psoDesc.DepthStencilState.StencilEnable = true;
+			psoDesc.DepthStencilState.StencilReadMask = 0xff;
+			psoDesc.DepthStencilState.StencilWriteMask = 0xff;
+
+			// front face
+			psoDesc.DepthStencilState.FrontFace.StencilFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+			psoDesc.DepthStencilState.FrontFace.StencilDepthFailOp = D3D12_STENCIL_OP_INCR_SAT; 
+			psoDesc.DepthStencilState.FrontFace.StencilFailOp = D3D12_STENCIL_OP_INCR_SAT;
+			psoDesc.DepthStencilState.FrontFace.StencilPassOp = D3D12_STENCIL_OP_INCR_SAT;
+
+			// back face 也要处理，有一些粒子特效没有cull back
+			psoDesc.DepthStencilState.BackFace.StencilFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+			psoDesc.DepthStencilState.BackFace.StencilDepthFailOp = D3D12_STENCIL_OP_INCR_SAT;
+			psoDesc.DepthStencilState.BackFace.StencilFailOp = D3D12_STENCIL_OP_INCR_SAT;
+			psoDesc.DepthStencilState.BackFace.StencilPassOp = D3D12_STENCIL_OP_INCR_SAT;
+		}
+	};
+
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC opaquePsoDesc;
+
+	//
+	// PSO for opaque objects.
+	//
+	ZeroMemory(&opaquePsoDesc, sizeof(D3D12_GRAPHICS_PIPELINE_STATE_DESC));
+	opaquePsoDesc.InputLayout = { mInputLayout.data(), (UINT)mInputLayout.size() };
+	opaquePsoDesc.pRootSignature = mRootSignature.Get();
+	opaquePsoDesc.VS =
+	{
+		reinterpret_cast<BYTE*>(mShaders["standardVS"]->GetBufferPointer()),
+		mShaders["standardVS"]->GetBufferSize()
+	};
+	opaquePsoDesc.PS =
+	{
+		reinterpret_cast<BYTE*>(mShaders["opaquePS"]->GetBufferPointer()),
+		mShaders["opaquePS"]->GetBufferSize()
+	};
+	opaquePsoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+
+	opaquePsoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+	
+	opaquePsoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+	opaquePsoDesc.SampleMask = UINT_MAX;
+	opaquePsoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+	opaquePsoDesc.NumRenderTargets = 1;
+	opaquePsoDesc.RTVFormats[0] = mBackBufferFormat;
+	opaquePsoDesc.SampleDesc.Count = m4xMsaaState ? 4 : 1;
+	opaquePsoDesc.SampleDesc.Quality = m4xMsaaState ? (m4xMsaaQuality - 1) : 0;
+	opaquePsoDesc.DSVFormat = mDepthStencilFormat;
+	ChangePSOForRenderMode(opaquePsoDesc);
+	ThrowIfFailed(md3dDevice->CreateGraphicsPipelineState(&opaquePsoDesc, IID_PPV_ARGS(&targetPsoMap["opaque"])));
+
+	//
+	// PSO for transparent objects
+	//
+
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC transparentPsoDesc = opaquePsoDesc;
+
+	D3D12_RENDER_TARGET_BLEND_DESC transparencyBlendDesc;
+	transparencyBlendDesc.BlendEnable = true;
+	transparencyBlendDesc.LogicOpEnable = false;
+	transparencyBlendDesc.SrcBlend = D3D12_BLEND_SRC_ALPHA;
+	transparencyBlendDesc.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+	transparencyBlendDesc.BlendOp = D3D12_BLEND_OP_ADD;
+	transparencyBlendDesc.SrcBlendAlpha = D3D12_BLEND_ONE;
+	transparencyBlendDesc.DestBlendAlpha = D3D12_BLEND_ZERO;
+	transparencyBlendDesc.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+	transparencyBlendDesc.LogicOp = D3D12_LOGIC_OP_NOOP;
+	transparencyBlendDesc.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+
+	transparentPsoDesc.BlendState.RenderTarget[0] = transparencyBlendDesc;
+	ChangePSOForRenderMode(transparentPsoDesc);
+	ThrowIfFailed(md3dDevice->CreateGraphicsPipelineState(&transparentPsoDesc, IID_PPV_ARGS(&targetPsoMap["transparent"])));
+
+	//
+	// PSO for alpha tested objects
+	//
+
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC alphaTestedPsoDesc = opaquePsoDesc;
+	alphaTestedPsoDesc.PS =
+	{
+		reinterpret_cast<BYTE*>(mShaders["alphaTestedPS"]->GetBufferPointer()),
+		mShaders["alphaTestedPS"]->GetBufferSize()
+	};
+	alphaTestedPsoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+	ChangePSOForRenderMode(alphaTestedPsoDesc);
+	ThrowIfFailed(md3dDevice->CreateGraphicsPipelineState(&alphaTestedPsoDesc, IID_PPV_ARGS(&targetPsoMap["alphaTested"])));
+
+	// PSO for additive-blending animated-bolt
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC animatedBoltPsoDesc = opaquePsoDesc;
+	animatedBoltPsoDesc.PS =
+	{
+		reinterpret_cast<BYTE*>(mShaders["animatedBoltPS"]->GetBufferPointer()),
+		mShaders["animatedBoltPS"]->GetBufferSize()
+	};
+	animatedBoltPsoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+
+	D3D12_RENDER_TARGET_BLEND_DESC animatedBoltBlendDesc = transparencyBlendDesc;
+	animatedBoltBlendDesc.SrcBlend = D3D12_BLEND_ONE;
+	animatedBoltBlendDesc.DestBlend = D3D12_BLEND_ONE;
+	animatedBoltBlendDesc.BlendOp = D3D12_BLEND_OP_ADD;
+	animatedBoltBlendDesc.SrcBlendAlpha = D3D12_BLEND_ZERO;
+	animatedBoltBlendDesc.DestBlendAlpha = D3D12_BLEND_ONE;
+	animatedBoltBlendDesc.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+	animatedBoltBlendDesc.LogicOp = D3D12_LOGIC_OP_NOOP;
+	animatedBoltBlendDesc.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+
+	animatedBoltPsoDesc.BlendState.RenderTarget[0] = animatedBoltBlendDesc;
+	ChangePSOForRenderMode(animatedBoltPsoDesc);
+	ThrowIfFailed(md3dDevice->CreateGraphicsPipelineState(&animatedBoltPsoDesc, IID_PPV_ARGS(&targetPsoMap["animatedBolt"])));
+}
+
+ComPtr<ID3D12PipelineState> BlendApp::GetPsoForSceneRendering(const std::string& psoName)
+{
+	if (mRenderMode == RenderMode::PixelOverdraw)
+	{
+		return mPixelOverdrawResources->mPixelOverdrawPSOs[psoName];
+	}
+
+	return mDefaultPSOs[psoName];
 }

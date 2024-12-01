@@ -114,6 +114,14 @@ VertexOut VS(VertexIn vin)
     return vout;
 }
 
+VertexOut VS_FullScreenQuad(VertexIn vin)
+{
+    VertexOut vout = (VertexOut) 0.0f;
+    vout.PosH = float4(vin.PosL, 1.0f);
+    vout.TexC = vin.TexC;
+    return vout;
+}
+
 float4 PS(VertexOut pin) : SV_Target
 {
     float4 diffuseAlbedo = gDiffuseMap.Sample(gsamAnisotropicWrap, pin.TexC) * gDiffuseAlbedo;
@@ -157,6 +165,12 @@ float4 PS(VertexOut pin) : SV_Target
     litColor.a = diffuseAlbedo.a;
 
     return litColor;
+}
+
+float4 PS_PixelOverdraw(VertexOut pin) : SV_TARGET
+{
+    float4 diffuseAlbedo = gDiffuseMap.Sample(gsamAnisotropicWrap, pin.TexC);
+    return float4(diffuseAlbedo.xyz, 1.0f);
 }
 
 
