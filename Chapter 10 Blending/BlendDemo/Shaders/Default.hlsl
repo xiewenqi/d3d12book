@@ -21,6 +21,7 @@
 #include "LightingUtil.hlsl"
 
 Texture2D    gDiffuseMap : register(t0);
+Texture2D<int> gStencilMap : register(t0);
 
 
 SamplerState gsamPointWrap        : register(s0);
@@ -78,6 +79,11 @@ cbuffer cbMaterial : register(b2)
 	float4x4 gMatTransform;
 };
 
+cbuffer cbStencilTextureProps : register(b3)
+{
+    float2 cbStencilTextureSize;
+};
+
 struct VertexIn
 {
 	float3 PosL    : POSITION;
@@ -87,10 +93,10 @@ struct VertexIn
 
 struct VertexOut
 {
-	float4 PosH    : SV_POSITION;
-    float3 PosW    : POSITION;
+    float4 PosH : SV_POSITION;
+    float3 PosW : POSITION;
     float3 NormalW : NORMAL;
-	float2 TexC    : TEXCOORD;
+    float2 TexC : TEXCOORD;
 };
 
 VertexOut VS(VertexIn vin)
@@ -169,8 +175,14 @@ float4 PS(VertexOut pin) : SV_Target
 
 float4 PS_PixelOverdraw(VertexOut pin) : SV_TARGET
 {
-    float4 diffuseAlbedo = gDiffuseMap.Sample(gsamAnisotropicWrap, pin.TexC);
-    return float4(diffuseAlbedo.xyz, 1.0f);
+    float2 texturePos = pin.TexC * gRenderTargetSize;
+    
+    int diffuseAlbedo = gStencilMap.Load(int3(texturePos, 0));
+    float colorR = diffuseAlbedo / 255.0f;
+    // 原colorR太小了，为了便于展示把R通道提亮一点
+    colorR = clamp(colorR * 25, 0, 1);
+    // float diffuseAlbedo = gDiffuseMap.Sample(gsamAnisotropicWrap, pin.TexC);
+    return float4(colorR, 0, 0, 1.0f);
 }
 
 

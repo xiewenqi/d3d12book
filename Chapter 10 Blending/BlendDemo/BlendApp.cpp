@@ -386,17 +386,23 @@ void BlendApp::Draw(const GameTimer& gt)
 				D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST));
 
 			// 将深度/模板缓冲区复制到 quadTexture 中
-			// mCommandList->CopyResource(mPixelOverdrawResources->quadTexture.Get(), mDepthStencilBuffer.Get());
-			D3D12_TEXTURE_COPY_LOCATION sourceLocation;
-			sourceLocation.pResource = mDepthStencilBuffer.Get();
-			sourceLocation.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-			sourceLocation.SubresourceIndex = 1;
+			if (false)
+			{
+				mCommandList->CopyResource(mPixelOverdrawResources->quadTexture.Get(), mDepthStencilBuffer.Get());
+			}
+			else
+			{
+				D3D12_TEXTURE_COPY_LOCATION sourceLocation;
+				sourceLocation.pResource = mDepthStencilBuffer.Get();
+				sourceLocation.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+				sourceLocation.SubresourceIndex = 1;
 
-			D3D12_TEXTURE_COPY_LOCATION destLocation;
-			destLocation.pResource = mPixelOverdrawResources->quadTexture.Get();
-			destLocation.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-			destLocation.SubresourceIndex = 0;
-			mCommandList->CopyTextureRegion(&destLocation, 0, 0, 0, &sourceLocation, nullptr);
+				D3D12_TEXTURE_COPY_LOCATION destLocation;
+				destLocation.pResource = mPixelOverdrawResources->quadTexture.Get();
+				destLocation.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+				destLocation.SubresourceIndex = 0;
+				mCommandList->CopyTextureRegion(&destLocation, 0, 0, 0, &sourceLocation, nullptr);
+			}
 
 			// 恢复深度/模板缓冲区的状态
 			mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(mDepthStencilBuffer.Get(),
@@ -1399,6 +1405,7 @@ void BlendApp::CreateResourcesForPixelOverdrawMode()
 	texDesc.MipLevels = 1;
 	
 	texDesc.Format = DXGI_FORMAT_R8_UINT;
+	// texDesc.Format = DXGI_FORMAT_R24G8_TYPELESS;
 	
 	texDesc.SampleDesc.Count = 1;
 	texDesc.SampleDesc.Quality = 0;
@@ -1419,8 +1426,9 @@ void BlendApp::CreateResourcesForPixelOverdrawMode()
 	D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
 	srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
 	
-	// srvDesc.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS; // todo xiewneqi:
+	// srvDesc.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
 	srvDesc.Format = DXGI_FORMAT_R8_UINT;
+	// srvDesc.Format = DXGI_FORMAT_X24_TYPELESS_G8_UINT;
 	
 	srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
 	srvDesc.Texture2D.MostDetailedMip = 0;
